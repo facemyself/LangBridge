@@ -1,7 +1,7 @@
 #!/bin/env bash
-export OMP_NUM_THREADS=8
-export TRANSFORMERS_CACHE=/mnt/sda/dongkeun/huggingface
-export HF_DATASETS_CACHE=/mnt/sda/dongkeun/huggingface_datasets
+# export OMP_NUM_THREADS=8
+# export TRANSFORMERS_CACHE=/mnt/sda/dongkeun/huggingface
+# export HF_DATASETS_CACHE=/mnt/sda/dongkeun/huggingface_datasets
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 NUM_GPU=4

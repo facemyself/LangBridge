@@ -60,18 +60,25 @@ class LBBaseModel(ABC, PreTrainedModel):
             else:
                 print('loading encoder from pretrained')
                 self.enc = enc_class.from_pretrained(config.enc)
+                self.dec = enc_class.from_pretrained(config.enc)
 
         # self.enc.gradient_checkpointing_enable(
             # gradient_checkpointing_kwargs={'use_reentrant': False})
 
         if config.alignments == 'linear':  # default
-            self.alignment = LinearWithAddedEos(
+            self.alignment_top = LinearWithAddedEos(
                 dim=config.dim_enc, out_dim=config.dim_lm)
-        elif config.alignments == 'ffn':  # mlp
-            self.alignment = FFNWithAddedEos(
+            self.alignment_bottom = LinearWithAddedEos(
+                dim=config.dim_enc, out_dim=config.dim_lm)
+        elif config.alignments_top == 'ffn':  # mlp
+            self.alignment_top = FFNWithAddedEos(
+                dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_bottom = FFNWithAddedEos(
                 dim=config.dim_enc, out_dim=config.dim_lm)
         elif config.alignments == 'latent':
-            self.alignment = PerceiverResampler(
+            self.alignment_top = PerceiverResampler(
+                dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
+            self.alignment_bottom = PerceiverResampler(
                 dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
         else:
             raise ValueError(
@@ -80,6 +87,11 @@ class LBBaseModel(ABC, PreTrainedModel):
     def freeze_encoder(self):
         """freeze vision model """
         for param in self.enc.parameters():
+            param.requires_grad = False
+
+    def freeze_decoder(self):
+        """freeze vision model """
+        for param in self.dec.parameters():
             param.requires_grad = False
 
     def freeze_lm(self):
@@ -91,17 +103,27 @@ class LBBaseModel(ABC, PreTrainedModel):
             param.requires_grad = True
 
     # get soft prompts
-    def get_encoder_features(self, enc_ids: torch.Tensor, enc_mask: torch.Tensor) -> torch.Tensor:
+    def get_encoder_features(self, enc_ids: torch.Tensor, enc_mask: torch.Tensor, index: int) -> torch.Tensor:
         if self.config.freeze_encoder:
             with torch.no_grad():
                 enc_features = self.enc(
-                    input_ids=enc_ids, attention_mask=enc_mask).last_hidden_state  # (b, s, d)
+                    input_ids=enc_ids, attention_mask=enc_mask).hidden_state[index]  # (b, s, d)
         else:
             enc_features = self.enc(
-                input_ids=enc_ids, attention_mask=enc_mask).last_hidden_state
-        enc_features = self.alignment(enc_features, enc_mask)
+                input_ids=enc_ids, attention_mask=enc_mask).hidden_state[index]
+        enc_features = self.alignment_bottom(enc_features, enc_mask)
         return enc_features
-
+    
+    def get_lm_features(self, lm_ids: torch.Tensor, lm_mask: torch.Tensor, index: int) -> torch.Tensor:
+        if self.config.freeze_encoder:
+            with torch.no_grad():
+                lm_features = self.lm(
+                    input_ids=lm_ids, attention_mask=glm_mask).hidden_state[index]  # (b, s, d)
+        else:
+            lm_features = self.lm(
+                input_ids=lm_ids, attention_mask=lm_mask).hidden_state[index]
+        lm_features = self.alignment_bottom(lm_features, lm_mask)
+        return lm_features
     def forward(
         self,
         enc_ids: torch.Tensor | None = None,
