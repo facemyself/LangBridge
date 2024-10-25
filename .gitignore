@@ -139,3 +139,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+.env
+python_scripts/lightning_logs/

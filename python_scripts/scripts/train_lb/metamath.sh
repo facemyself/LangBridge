@@ -1,22 +1,23 @@
 #!/bin/env bash
 #export TRANSFORMERS_CACHE=/data1/rzw/CACHE/huggingface/hub
 export HUGGINGFACE_HUB_CACHE=/data1/rzw/CACHE/huggingface/hub
-
-export CUDA_VISIBLE_DEVICES=0
-NUM_GPU=1
-
+export CUDA_LAUNCH_BLOCKING=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+NUM_GPU=4
+#google/mt5-xl 
+#facebook/xglm-1.7B
 ARGS="
 --n_gpu $NUM_GPU
 --strategy deepspeed_stage_2
 --output_dir checkpoints/metamath-lb-9b
---run_name metamath-lb-9b
+--run_name metamath-qwen2.5
 --seed 42
 --train_set_path /data1/rzw/CODE/LangBridge/data/metamath-200k
 --output_exists True
---enc_name_or_path facebook/xglm-1.7B
+--enc_name_or_path Qwen/Qwen2.5-1.5B-Instruct
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
 --alignments linear
---enc_hidden_size 2048
+--enc_hidden_size 1536
 --lm_hidden_size 4096
 --max_length 128
 --max_length_enc 1024
@@ -34,6 +35,7 @@ ARGS="
 --num_train_epochs 1
 --dataloader_num_workers 16
 --bf16 True
+--use_wandb True
 "
 
 echo $ARGS

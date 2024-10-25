@@ -17,7 +17,7 @@ from deepspeed.ops.adam import FusedAdam
 from transformers import HfArgumentParser, AutoTokenizer
 from transformers.utils import logging as hf_logging
 import sys
-sys.path.append('/workspace/LangBridge')
+sys.path.append('/data1/rzw/CODE/LangBridge/')
 from langbridge import LangBridgeModel, LangBridgeConfig
 from dataset import Data
 
@@ -25,14 +25,16 @@ torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
 logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
-import debugpy
-try:
-    # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-    debugpy.listen(("localhost", 16235))
-    print("Waiting for debugger attach")
-    debugpy.wait_for_client()
-except Exception as e:
-    pass
+
+
+# import debugpy
+# try:
+#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 16236))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
@@ -133,17 +135,17 @@ class AlignLBModule(LightningModule):
         except IndexError:
             print(len(no_output_data), offsets.shape)
             raise IndexError
-
-        lm_tokens = self.lm_tokenizer(
+        # enc_tokenizer is same as dec_tokenizer
+        dec_tokens = self.enc_tokenizer(
             suffix, max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
-        labels = lm_tokens['input_ids'].clone().detach()
-        labels[labels == self.lm_tokenizer.pad_token_id] = -100
+        labels = dec_tokens['input_ids'].clone().detach()
+        labels[labels == self.enc_tokenizer.pad_token_id] = -100
 
         return {
             'enc_ids': enc_input_ids,
             'enc_mask': enc_attention_mask,
-            'input_ids': lm_tokens['input_ids'],
-            'attention_mask': lm_tokens['attention_mask'],
+            'input_ids': dec_tokens['input_ids'],
+            'attention_mask': dec_tokens['attention_mask'],
             'labels': labels,
         }
 
@@ -240,6 +242,7 @@ class LBTrainingArguments:
 
     freeze_language_model: bool = field(default=True)
     freeze_encoder: bool = field(default=True)
+    freeze_decoder: bool = field(default=True)
 
     # redefine some HF arguments
     seed: int = field(default=42)
@@ -267,6 +270,7 @@ class LBTrainingArguments:
     gradient_clip_val: float = field(default=1.0)
     bf16: bool = field(default=True)
 
+    use_wandb: bool = field(default=True)
 
 if __name__ == '__main__':
     parser = HfArgumentParser(LBTrainingArguments)
@@ -324,6 +328,7 @@ if __name__ == '__main__':
         dim_lm=training_args.lm_hidden_size,
         freeze_language_model=training_args.freeze_language_model,
         freeze_encoder=training_args.freeze_encoder,
+        freeze_decoder=training_args.freeze_decoder,
     )
 
     model_class = LangBridgeModel
@@ -340,17 +345,17 @@ if __name__ == '__main__':
         model = model_class(config, random_init=False)
 
     # this is true for all our experiments, explained in section D.1
-    if training_args.add_new_lines_to_enc:
-        logger.info('Adding whitespaces to encoder tokenizer')
-        whitespace = list(string.whitespace)[1:]  # exclude single space
-        whitespace = whitespace + ['  ', '   ', '    ']  # add multispace
-        enc_tokenizer.add_special_tokens(
-            {'additional_special_tokens': whitespace})
+    # if training_args.add_new_lines_to_enc:
+    #     logger.info('Adding whitespaces to encoder tokenizer')
+    #     whitespace = list(string.whitespace)[1:]  # exclude single space
+    #     whitespace = whitespace + ['  ', '   ', '    ']  # add multispace
+    #     enc_tokenizer.add_special_tokens(
+    #         {'additional_special_tokens': whitespace})
 
-        if training_args.freeze_encoder:
-            model.lb.enc.get_input_embeddings().weight.requires_grad = True
-            logger.warning(
-                'Unfreezing encoder embedding layer since new tokens were added')
+    #     if training_args.freeze_encoder:
+    #         model.lb.enc.get_input_embeddings().weight.requires_grad = True
+    #         logger.warning(
+    #             'Unfreezing encoder embedding layer since new tokens were added')
 
     summary(model)
 
@@ -358,11 +363,16 @@ if __name__ == '__main__':
         model.train()
     pl_model = AlignLBModule(model, enc_tokenizer,
                              lm_tokenizer, training_args)
-
-    # wandb_logger = WandbLogger(
-    #     project='langbridge',
-    #     name=training_args.run_name)
-    wandb_logger = None
+    if training_args.use_wandb:
+        from dotenv import load_dotenv
+        load_dotenv()
+        os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
+        os.environ["WANDB_MODE"] = "offline"
+        wandb_logger = WandbLogger(
+            project='Multilingual',
+            name=training_args.run_name)
+    else:
+        wandb_logger = None
 
     trainer = Trainer(
         accelerator='gpu',

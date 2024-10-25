@@ -36,6 +36,19 @@ class LinearWithAddedEos(nn.Module):
         x = torch.cat((x, eos), dim=1)
         return x
 
+class LinearNoEos(nn.Module):
+    """
+    Linear layer with optional bias and activation function.
+    """
+
+    def __init__(self, dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(dim, out_dim, bias=True)
+
+    def forward(self, x, *args):
+        x = self.linear(x)
+        return x
+
 
 class FFNWithAddedEos(nn.Module):
     def __init__(self, dim, out_dim):

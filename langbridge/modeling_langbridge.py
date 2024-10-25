@@ -11,14 +11,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel, XGLMForCausalLM
+from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel, XGLMForCausalLM, GPT2LMHeadModel, Qwen2ForCausalLM
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast
 )
 
 from .configuration_langbridge import LangBridgeConfig
-from .alignment_modules import LinearWithAddedEos, PerceiverResampler, FFNWithAddedEos
+from .alignment_modules import LinearWithAddedEos, PerceiverResampler, FFNWithAddedEos, LinearNoEos
 
 
 @contextlib.contextmanager
@@ -39,7 +39,7 @@ class LBBaseModel(ABC, PreTrainedModel):
     enc: PreTrainedModel
     lm: PreTrainedModel
     lm_head: nn.Linear
-    embeddings: nn.Embedding
+    enc_embeddings: nn.Embedding
 
     config_class = LangBridgeConfig
 
@@ -49,26 +49,30 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_class = UMT5EncoderModel
         elif 'mt5' in config.enc.lower():
             enc_class = MT5EncoderModel
-        elif 'xglm' in config.enc.lower():
-            enc_class = XGLMForCausalLM
+        elif 'mgpt' in config.enc.lower():
+            enc_class = GPT2LMHeadModel
+        elif 'qwen' in config.enc.lower():
+            enc_class = Qwen2ForCausalLM
         else:
             enc_class = AutoModel
 
-        with suppress_model_loading_warnings(suppress_warnings):
-            if random_init:
-                enc_config = AutoConfig.from_pretrained(
-                    config.enc)
-                self.enc = enc_class(config=enc_config)
-            else:
-                print('loading encoder from pretrained')
-                self.enc = enc_class.from_pretrained(config.enc)
-                self.dec = enc_class.from_pretrained(config.enc)
-                self.dec_head = self.dec.lm_head
+        #with suppress_model_loading_warnings(suppress_warnings):
+        if random_init:
+            enc_config = AutoConfig.from_pretrained(
+                config.enc)
+            self.enc = enc_class(config=enc_config)
+        else:
+            print('loading encoder from pretrained')
+            self.enc = enc_class.from_pretrained(config.enc)
+            self.enc_embeddings = self.enc.get_input_embeddings()
+            print(self.enc)
+            self.dec = enc_class.from_pretrained(config.enc)
+            self.dec_head = self.dec.lm_head
         # self.enc.gradient_checkpointing_enable(
             # gradient_checkpointing_kwargs={'use_reentrant': False})
 
         if config.alignments == 'linear':  # default
-            self.alignment_bottom = LinearWithAddedEos(
+            self.alignment_bottom = LinearNoEos(
                 dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = LinearWithAddedEos(
                 dim=config.dim_lm, out_dim=config.dim_enc)
@@ -151,39 +155,47 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_past_key_values, lm_past_key_values, dec_past_key_values = past_key_values[0], past_key_values[1], past_key_values[2]
 
         if input_ids is not None:
-            embeddings = self.embeddings(input_ids)
+            embeddings = self.enc_embeddings(input_ids)
         bos_shifted = False
         #kwargs.pop('past_key_values', None)
-        enc_out: BaseModelOutputWithPast = self.enc(
+        enc_out = self.enc(input_ids=enc_ids,
+                            attention_mask=enc_mask, output_hidden_states=True)
+        # 使用 hidden_states 而不是 last_hidden_state
+        enc_features = self.alignment_bottom(enc_out.hidden_states[-1], enc_mask) 
+        
+
+        # pass through LM
+        lm_out: BaseModelOutputWithPast = self.lm(
             attention_mask=enc_mask,
-            input_ids=enc_ids,
+            inputs_embeds=enc_features,
             use_cache=use_cache,
-            past_key_values=enc_past_key_values,
+            past_key_values=lm_past_key_values,
             return_dict=True,
             **kwargs
         )
-        enc_features = self.alignment_bottom(enc_out.last_hidden_state, enc_mask) 
-        if input_ids is not None:
-            first_input_ids = input_ids[:, 0]
-            if all(first_input_ids == self.lm.config.bos_token_id):
-                # move bos embedding to the front
-                bos_shifted = True
-                embeddings = torch.cat(
-                    [embeddings[:, 0].unsqueeze(dim=1), enc_features, embeddings[:, 1:]], dim=1)
-            else:
-                embeddings = torch.cat([enc_features, embeddings], dim=1)
-        else:
-            embeddings = enc_features
 
-        if past_key_values is None:
-            enc_feature_length = enc_features.shape[1]
+        lm_features = self.alignment_top(lm_out.last_hidden_state, enc_mask)  # 使用self.LLM的最后一层hidden state
+        if dec_past_key_values is None:
+            if input_ids is not None:
+                first_input_ids = input_ids[:, 0]
+                if all(first_input_ids == self.dec.config.bos_token_id):
+                    # move bos embedding to the front
+                    bos_shifted = True
+                    embeddings = torch.cat(
+                        [embeddings[:, 0].unsqueeze(dim=1), lm_features, embeddings[:, 1:]], dim=1)
+                else:
+                    embeddings = torch.cat([lm_features, embeddings], dim=1)
+            
+            else:
+                embeddings = lm_features             
+            lm_feature_length = lm_features.shape[1]            
         else:
-            enc_feature_length = past_key_values[3]
+            lm_feature_length = past_key_values[3]
 
         if input_ids is not None:
             if self.config.alignments not in ['linear', 'ffn']:
                 attn_mask = torch.cat(
-                    [torch.ones((batch_size, enc_features.shape[1]), device=device, dtype=torch.long), attention_mask], dim=1)
+                    [torch.ones((batch_size, lm_feature_length), device=device, dtype=torch.long), attention_mask], dim=1)
             else:
                 # use the encoder masks for the soft prompts
                 if bos_shifted:
@@ -196,36 +208,24 @@ class LBBaseModel(ABC, PreTrainedModel):
                         [enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
         else:
             attn_mask = enc_mask
-
-        # pass through LM
-        lm_out: BaseModelOutputWithPast = self.lm(
-            attention_mask=attn_mask,
-            inputs_embeds=embeddings,
-            use_cache=use_cache,
-            past_key_values=lm_past_key_values,
-            return_dict=True,
-            **kwargs
-        )
-
-        lm_features = self.alignment_top(lm_out.last_hidden_state, attn_mask)  # 使用self.LLM的最后一层hidden state
-
         # pass through decoder
         dec_out: BaseModelOutputWithPast = self.dec(
             attention_mask=attn_mask,
-            inputs_embeds=lm_features,
+            inputs_embeds=embeddings,
             use_cache=use_cache,
             past_key_values=dec_past_key_values,
             return_dict=True,
+            output_hidden_states=True,
             **kwargs
         )
 
-        logits: torch.Tensor = self.dec_head(dec_out.last_hidden_state)  # 使用self.dec的head生成最终的word
+        logits: torch.Tensor = self.dec_head(dec_out.hidden_states[-1])  # 使用self.dec的head生成最终的word
 
         loss = None
         if labels is not None:
             # no loss for soft prompts
             no_loss_labels = torch.zeros(
-                (batch_size, enc_feature_length), device=device, dtype=torch.long) + -100
+                (batch_size, lm_feature_length), device=device, dtype=torch.long) + -100
 
             if bos_shifted:
                 full_labels = torch.cat(
@@ -245,12 +245,12 @@ class LBBaseModel(ABC, PreTrainedModel):
                 # CrossEntropyLoss will flatten all dimensions by default
                 loss = rearrange(loss, '(b s) -> b s', b=batch_size)
                 # remove soft promtps from loss
-                loss = loss[:, enc_feature_length:]
+                loss = loss[:, lm_feature_length:]
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=(enc_out.past_key_values, lm_out.past_key_values, dec_out.past_key_values,
-                             enc_feature_length) if use_cache else None,
+                             lm_feature_length) if use_cache else None,
             hidden_states=dec_out.hidden_states,
             attentions=dec_out.attentions,
         )
@@ -373,6 +373,8 @@ class LangBridgeModel(PreTrainedModel):
 
         if config.freeze_encoder:
             self.freeze_encoder()
+        if config.freeze_decoder:
+            self.freeze_decoder()
 
     @classmethod
     def _find_lm_class(cls, language_model_id: str):
@@ -383,6 +385,10 @@ class LangBridgeModel(PreTrainedModel):
 
     def freeze_encoder(self):
         self.lb.freeze_encoder()
+
+    def freeze_decoder(self):
+        self.lb.freeze_decoder()
+
 
     def freeze_lm(self):
         self.lb.freeze_lm()
@@ -505,4 +511,5 @@ class LangBridgeModel(PreTrainedModel):
         # TODO: don't know why batch_decode doesn't remove <|im_end|>, since it's in the special tokens
         completions = [s.replace('<|im_end|>', '') for s in completions]
         return completions
+
 

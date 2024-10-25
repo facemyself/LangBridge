@@ -11,14 +11,17 @@ class LangBridgeConfig(PretrainedConfig):
         dim_lm: int = 768,
         freeze_language_model: bool = True,
         freeze_encoder: bool = True,
+        freeze_decoder: bool = True,
         alignments: str = 'linear',
         **kwargs
     ):
         super().__init__(**kwargs)
         self.lm = lm
         self.enc = enc
+        self.dec = enc
         self.dim_enc = dim_enc
         self.dim_lm = dim_lm
         self.freeze_language_model = freeze_language_model
         self.freeze_encoder = freeze_encoder
+        self.freeze_decoder = freeze_decoder
         self.alignments = alignments
