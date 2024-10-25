@@ -365,7 +365,7 @@ if __name__ == '__main__':
     wandb_logger = None
 
     trainer = Trainer(
-        accelerator='gpu',
+        accelerator='cpu',
         strategy=training_args.strategy,
         devices=training_args.n_gpu,
         max_epochs=int(training_args.num_train_epochs),
@@ -385,3 +385,4 @@ if __name__ == '__main__':
         trainer.fit(pl_model)
     else:
         trainer.validate(pl_model)
+

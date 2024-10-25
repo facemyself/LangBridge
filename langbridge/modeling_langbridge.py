@@ -145,7 +145,10 @@ class LBBaseModel(ABC, PreTrainedModel):
         # find the input shape
         batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-        lm_past_key_values = None if past_key_values is None else past_key_values[0]
+        if past_key_values is None:
+            enc_past_key_values, lm_past_key_values, dec_past_key_values = None, None, None
+        else:
+            enc_past_key_values, lm_past_key_values, dec_past_key_values = past_key_values[0], past_key_values[1], past_key_values[2]
 
         if input_ids is not None:
             embeddings = self.embeddings(input_ids)
@@ -155,6 +158,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             attention_mask=enc_mask,
             input_ids=enc_ids,
             use_cache=use_cache,
+            past_key_values=enc_past_key_values,
             return_dict=True,
             **kwargs
         )
@@ -174,7 +178,7 @@ class LBBaseModel(ABC, PreTrainedModel):
         if past_key_values is None:
             enc_feature_length = enc_features.shape[1]
         else:
-            enc_feature_length = past_key_values[1]
+            enc_feature_length = past_key_values[3]
 
         if input_ids is not None:
             if self.config.alignments not in ['linear', 'ffn']:
@@ -198,7 +202,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             attention_mask=attn_mask,
             inputs_embeds=embeddings,
             use_cache=use_cache,
-            past_key_values=lm_past_key_values[0],
+            past_key_values=lm_past_key_values,
             return_dict=True,
             **kwargs
         )
@@ -210,6 +214,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             attention_mask=attn_mask,
             inputs_embeds=lm_features,
             use_cache=use_cache,
+            past_key_values=dec_past_key_values,
             return_dict=True,
             **kwargs
         )
@@ -244,7 +249,7 @@ class LBBaseModel(ABC, PreTrainedModel):
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=(lm_out.past_key_values,
+            past_key_values=(enc_out.past_key_values, lm_out.past_key_values, dec_out.past_key_values,
                              enc_feature_length) if use_cache else None,
             hidden_states=dec_out.hidden_states,
             attentions=dec_out.attentions,
@@ -500,3 +505,4 @@ class LangBridgeModel(PreTrainedModel):
         # TODO: don't know why batch_decode doesn't remove <|im_end|>, since it's in the special tokens
         completions = [s.replace('<|im_end|>', '') for s in completions]
         return completions
+
