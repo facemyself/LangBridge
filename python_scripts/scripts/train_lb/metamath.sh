@@ -2,8 +2,8 @@
 export TRANSFORMERS_CACHE=/workspace/CACHE
 export HF_DATASETS_CACHE=/workspace/CACHE
 
-export CUDA_VISIBLE_DEVICES=0,1
-NUM_GPU=2
+export CUDA_VISIBLE_DEVICES=0
+NUM_GPU=1
 
 ARGS="
 --n_gpu $NUM_GPU
@@ -13,7 +13,7 @@ ARGS="
 --seed 42
 --train_set_path /workspace/LangBridge/data/metamath-200k
 --output_exists True
---enc_name_or_path google/mt5-xl
+--enc_name_or_path facebook/xglm-1.7B
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
 --alignments linear
 --enc_hidden_size 2048

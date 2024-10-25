@@ -16,7 +16,8 @@ from deepspeed.ops.adam import FusedAdam
 
 from transformers import HfArgumentParser, AutoTokenizer
 from transformers.utils import logging as hf_logging
-
+import sys
+sys.path.append('/workspace/LangBridge')
 from langbridge import LangBridgeModel, LangBridgeConfig
 from dataset import Data
 
@@ -24,7 +25,14 @@ torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
 logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
-
+import debugpy
+try:
+    # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+    debugpy.listen(("localhost", 16235))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()
+except Exception as e:
+    pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
@@ -56,7 +64,7 @@ class AlignLBModule(LightningModule):
                  prog_bar=True, logger=True, sync_dist=self.sync_dist, add_dataloader_idx=False)
 
     def configure_optimizers(self):
-        alignment, enc, lm = [], [], []
+        alignment, enc, lm, dec = [], [], [], []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if 'alignment' in name:
@@ -65,6 +73,8 @@ class AlignLBModule(LightningModule):
                     enc.append(param)
                 elif 'lm' in name:
                     lm.append(param)
+                elif 'dec' in name:
+                    dec.append(param)
                 else:
                     raise ValueError('unknown parameter')
         params = [
@@ -74,6 +84,8 @@ class AlignLBModule(LightningModule):
                 'weight_decay': self.args.w_decay_enc},
             {'params': lm, 'lr': self.args.learning_rate_lm,
                 'weight_decay': self.args.w_decay_lm},
+            {'params': dec, 'lr': self.args.learning_rate_enc,
+                'weight_decay': self.args.w_decay_enc},
         ]
         if 'deepspeed' in self.args.strategy:
             optimizer = FusedAdam(params)
@@ -347,9 +359,10 @@ if __name__ == '__main__':
     pl_model = AlignLBModule(model, enc_tokenizer,
                              lm_tokenizer, training_args)
 
-    wandb_logger = WandbLogger(
-        project='langbridge',
-        name=training_args.run_name)
+    # wandb_logger = WandbLogger(
+    #     project='langbridge',
+    #     name=training_args.run_name)
+    wandb_logger = None
 
     trainer = Trainer(
         accelerator='gpu',

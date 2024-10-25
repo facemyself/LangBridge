@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel
+from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel, XGLMForCausalLM
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast
@@ -49,6 +49,8 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_class = UMT5EncoderModel
         elif 'mt5' in config.enc.lower():
             enc_class = MT5EncoderModel
+        elif 'xglm' in config.enc.lower():
+            enc_class = XGLMForCausalLM
         else:
             enc_class = AutoModel
 
@@ -131,9 +133,7 @@ class LBBaseModel(ABC, PreTrainedModel):
         input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         use_cache: bool = True,
-        enc_past_key_values: tuple | None = None,
-        lm_past_key_values: tuple | None = None,
-        dec_past_key_values: tuple | None = None,
+        past_key_values: tuple | None = None,
         return_dict: bool = True,
         labels: torch.Tensor | None = None,
         loss_reduction: str = 'mean',
@@ -145,17 +145,16 @@ class LBBaseModel(ABC, PreTrainedModel):
         # find the input shape
         batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-        #lm_past_key_values = None if past_key_values is None else past_key_values[0]
+        lm_past_key_values = None if past_key_values is None else past_key_values[0]
 
         if input_ids is not None:
             embeddings = self.embeddings(input_ids)
         bos_shifted = False
-
+        #kwargs.pop('past_key_values', None)
         enc_out: BaseModelOutputWithPast = self.enc(
             attention_mask=enc_mask,
             input_ids=enc_ids,
             use_cache=use_cache,
-            past_key_values=enc_past_key_values,
             return_dict=True,
             **kwargs
         )
@@ -172,10 +171,10 @@ class LBBaseModel(ABC, PreTrainedModel):
         else:
             embeddings = enc_features
 
-        if lm_past_key_values is None:
+        if past_key_values is None:
             enc_feature_length = enc_features.shape[1]
         else:
-            enc_feature_length = enc_past_key_values[1]
+            enc_feature_length = past_key_values[1]
 
         if input_ids is not None:
             if self.config.alignments not in ['linear', 'ffn']:
@@ -211,7 +210,6 @@ class LBBaseModel(ABC, PreTrainedModel):
             attention_mask=attn_mask,
             inputs_embeds=lm_features,
             use_cache=use_cache,
-            past_key_values=dec_past_key_values,
             return_dict=True,
             **kwargs
         )
@@ -246,16 +244,10 @@ class LBBaseModel(ABC, PreTrainedModel):
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            enc_past_key_values=(enc_out.past_key_values,
+            past_key_values=(lm_out.past_key_values,
                              enc_feature_length) if use_cache else None,
-            lm_past_key_values=lm_out.past_key_values if use_cache else None,
-            dec_past_key_values=dec_out.past_key_values if use_cache else None,
-            enc_hidden_states=enc_out.hidden_states,
-            lm_hidden_states=lm_out.hidden_states,
-            dec_hidden_states=dec_out.hidden_states,
-            enc_attentions=enc_out.attentions,
-            lm_attentions=lm_out.attentions,
-            dec_attentions=dec_out.attentions,
+            hidden_states=dec_out.hidden_states,
+            attentions=dec_out.attentions,
         )
 
 
