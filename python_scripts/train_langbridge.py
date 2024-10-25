@@ -348,9 +348,10 @@ if __name__ == '__main__':
     pl_model = AlignLBModule(model, enc_tokenizer,
                              lm_tokenizer, training_args)
 
-    wandb_logger = WandbLogger(
-        project='langbridge',
-        name=training_args.run_name)
+    # wandb_logger = WandbLogger(
+    #     project='langbridge',
+    #     name=training_args.run_name)
+    wandb_logger = None
 
     trainer = Trainer(
         accelerator='gpu',
