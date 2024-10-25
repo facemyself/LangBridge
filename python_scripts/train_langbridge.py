@@ -16,7 +16,8 @@ from deepspeed.ops.adam import FusedAdam
 
 from transformers import HfArgumentParser, AutoTokenizer
 from transformers.utils import logging as hf_logging
-
+import sys
+sys.path.append('/workspace/LangBridge')
 from langbridge import LangBridgeModel, LangBridgeConfig
 from dataset import Data
 
