@@ -61,25 +61,25 @@ class LBBaseModel(ABC, PreTrainedModel):
                 print('loading encoder from pretrained')
                 self.enc = enc_class.from_pretrained(config.enc)
                 self.dec = enc_class.from_pretrained(config.enc)
-
+                self.dec_head = self.dec.lm_head
         # self.enc.gradient_checkpointing_enable(
             # gradient_checkpointing_kwargs={'use_reentrant': False})
 
         if config.alignments == 'linear':  # default
-            self.alignment_top = LinearWithAddedEos(
-                dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_bottom = LinearWithAddedEos(
                 dim=config.dim_enc, out_dim=config.dim_lm)
-        elif config.alignments_top == 'ffn':  # mlp
-            self.alignment_top = FFNWithAddedEos(
-                dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_top = LinearWithAddedEos(
+                dim=config.dim_lm, out_dim=config.dim_enc)
+        elif config.alignments == 'ffn':  # mlp
             self.alignment_bottom = FFNWithAddedEos(
                 dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_top = FFNWithAddedEos(
+                dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'latent':
-            self.alignment_top = PerceiverResampler(
-                dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
             self.alignment_bottom = PerceiverResampler(
                 dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
+            self.alignment_top = PerceiverResampler(
+                dim=config.dim_lm, out_dim=config.dim_enc, num_latents=config.num_latents)
         else:
             raise ValueError(
                 f'unknown alignment type {config.alignments}')
@@ -118,11 +118,11 @@ class LBBaseModel(ABC, PreTrainedModel):
         if self.config.freeze_encoder:
             with torch.no_grad():
                 lm_features = self.lm(
-                    input_ids=lm_ids, attention_mask=glm_mask).hidden_state[index]  # (b, s, d)
+                    input_ids=lm_ids, attention_mask=lm_mask).hidden_state[index]  # (b, s, d)
         else:
             lm_features = self.lm(
                 input_ids=lm_ids, attention_mask=lm_mask).hidden_state[index]
-        lm_features = self.alignment_bottom(lm_features, lm_mask)
+        lm_features = self.alignment_top(lm_features, lm_mask)
         return lm_features
     def forward(
         self,
@@ -131,7 +131,9 @@ class LBBaseModel(ABC, PreTrainedModel):
         input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         use_cache: bool = True,
-        past_key_values: tuple | None = None,
+        enc_past_key_values: tuple | None = None,
+        lm_past_key_values: tuple | None = None,
+        dec_past_key_values: tuple | None = None,
         return_dict: bool = True,
         labels: torch.Tensor | None = None,
         loss_reduction: str = 'mean',
@@ -141,39 +143,44 @@ class LBBaseModel(ABC, PreTrainedModel):
         assert return_dict, "can only use return_dict=True at the moment!"
 
         # find the input shape
-        batch_size, seq_length = input_ids.shape[:
-                                                 2] if input_ids is not None else enc_ids.shape[:2]
+        batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-        lm_past_key_values = None if past_key_values is None else past_key_values[0]
+        #lm_past_key_values = None if past_key_values is None else past_key_values[0]
 
         if input_ids is not None:
             embeddings = self.embeddings(input_ids)
         bos_shifted = False
-        if lm_past_key_values is None:
-            assert enc_ids.size(0) == batch_size
 
-            enc_features = self.get_encoder_features(
-                enc_ids, enc_mask)
-
-            if input_ids is not None:
-                first_input_ids = input_ids[:, 0]
-                if all(first_input_ids == self.lm.config.bos_token_id):
-                    # move bos embedding to the front
-                    bos_shifted = True
-                    embeddings = torch.cat(
-                        [embeddings[:, 0].unsqueeze(dim=1), enc_features, embeddings[:, 1:]], dim=1)
-                else:
-                    embeddings = torch.cat([enc_features, embeddings], dim=1)
+        enc_out: BaseModelOutputWithPast = self.enc(
+            attention_mask=enc_mask,
+            input_ids=enc_ids,
+            use_cache=use_cache,
+            past_key_values=enc_past_key_values,
+            return_dict=True,
+            **kwargs
+        )
+        enc_features = self.alignment_bottom(enc_out.last_hidden_state, enc_mask) 
+        if input_ids is not None:
+            first_input_ids = input_ids[:, 0]
+            if all(first_input_ids == self.lm.config.bos_token_id):
+                # move bos embedding to the front
+                bos_shifted = True
+                embeddings = torch.cat(
+                    [embeddings[:, 0].unsqueeze(dim=1), enc_features, embeddings[:, 1:]], dim=1)
             else:
-                embeddings = enc_features
+                embeddings = torch.cat([enc_features, embeddings], dim=1)
+        else:
+            embeddings = enc_features
+
+        if lm_past_key_values is None:
             enc_feature_length = enc_features.shape[1]
         else:
-            enc_feature_length = past_key_values[1]
+            enc_feature_length = enc_past_key_values[1]
 
         if input_ids is not None:
             if self.config.alignments not in ['linear', 'ffn']:
                 attn_mask = torch.cat(
-                    [torch.ones((batch_size, enc_feature_length), device=device, dtype=torch.long), attention_mask], dim=1)
+                    [torch.ones((batch_size, enc_features.shape[1]), device=device, dtype=torch.long), attention_mask], dim=1)
             else:
                 # use the encoder masks for the soft prompts
                 if bos_shifted:
@@ -188,16 +195,28 @@ class LBBaseModel(ABC, PreTrainedModel):
             attn_mask = enc_mask
 
         # pass through LM
-        out: BaseModelOutputWithPast = self.lm(
+        lm_out: BaseModelOutputWithPast = self.lm(
             attention_mask=attn_mask,
             inputs_embeds=embeddings,
             use_cache=use_cache,
-            past_key_values=lm_past_key_values,
+            past_key_values=lm_past_key_values[0],
             return_dict=True,
             **kwargs
         )
 
-        logits: torch.Tensor = self.lm_head(out.last_hidden_state)
+        lm_features = self.alignment_top(lm_out.last_hidden_state, attn_mask)  # 使用self.LLM的最后一层hidden state
+
+        # pass through decoder
+        dec_out: BaseModelOutputWithPast = self.dec(
+            attention_mask=attn_mask,
+            inputs_embeds=lm_features,
+            use_cache=use_cache,
+            past_key_values=dec_past_key_values,
+            return_dict=True,
+            **kwargs
+        )
+
+        logits: torch.Tensor = self.dec_head(dec_out.last_hidden_state)  # 使用self.dec的head生成最终的word
 
         loss = None
         if labels is not None:
@@ -227,10 +246,16 @@ class LBBaseModel(ABC, PreTrainedModel):
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=(out.past_key_values,
+            enc_past_key_values=(enc_out.past_key_values,
                              enc_feature_length) if use_cache else None,
-            hidden_states=out.hidden_states,
-            attentions=out.attentions,
+            lm_past_key_values=lm_out.past_key_values if use_cache else None,
+            dec_past_key_values=dec_out.past_key_values if use_cache else None,
+            enc_hidden_states=enc_out.hidden_states,
+            lm_hidden_states=lm_out.hidden_states,
+            dec_hidden_states=dec_out.hidden_states,
+            enc_attentions=enc_out.attentions,
+            lm_attentions=lm_out.attentions,
+            dec_attentions=dec_out.attentions,
         )
 
 

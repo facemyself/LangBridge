@@ -1,10 +1,9 @@
 #!/bin/env bash
-# export OMP_NUM_THREADS=8
-# export TRANSFORMERS_CACHE=/mnt/sda/dongkeun/huggingface
-# export HF_DATASETS_CACHE=/mnt/sda/dongkeun/huggingface_datasets
+export TRANSFORMERS_CACHE=/workspace/CACHE
+export HF_DATASETS_CACHE=/workspace/CACHE
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-NUM_GPU=4
+export CUDA_VISIBLE_DEVICES=0,1
+NUM_GPU=2
 
 ARGS="
 --n_gpu $NUM_GPU
@@ -12,9 +11,9 @@ ARGS="
 --output_dir checkpoints/metamath-lb-9b
 --run_name metamath-lb-9b
 --seed 42
---train_set_path DKYoon/metamath-200k
+--train_set_path /workspace/LangBridge/data/metamath-200k
 --output_exists True
---enc_name_or_path DKYoon/mt5-xl-lm-adapt
+--enc_name_or_path google/mt5-xl
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
 --alignments linear
 --enc_hidden_size 2048
