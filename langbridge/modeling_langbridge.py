@@ -69,7 +69,7 @@ class LBBaseModel(ABC, PreTrainedModel):
 
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
-            self.alignment_top = LinearWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
+            self.alignment_top = LinearNoEos(dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'ffn':
             self.alignment_bottom = FFNWithAddedEos(dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = FFNWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
@@ -108,8 +108,12 @@ class LBBaseModel(ABC, PreTrainedModel):
         loss_reduction: str = 'mean',
         **kwargs
     ) -> CausalLMOutputWithPast:
-        batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
+        batch_size, seq_length = enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
+
+        if input_ids is not None:
+            enc_ids = torch.cat([enc_ids, input_ids], dim=1)
+            enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
         # 通过第一个Qwen模型
         enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True)
         enc_features = self.alignment_bottom(enc_out.hidden_states[-1], enc_mask)
@@ -119,27 +123,27 @@ class LBBaseModel(ABC, PreTrainedModel):
         lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
 
         # 准备第二个Qwen模型的输入
-        if input_ids is not None:
-            embeddings = self.enc_embeddings(input_ids)
-            embeddings = torch.cat([lm_features, embeddings], dim=1)
-            attn_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
-        else:
-            embeddings = lm_features
-            attn_mask = enc_mask
+        # if input_ids is not None:
+        #     embeddings = self.enc_embeddings(input_ids)
+        #     embeddings = torch.cat([lm_features, embeddings], dim=1)
+        #     attn_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
+        # else:
+        #     embeddings = lm_features
+        #     attn_mask = enc_mask
 
 
 
         # 通过第二个Qwen模型
-        dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=embeddings, output_hidden_states=True)
+        dec_out = self.dec(attention_mask=enc_mask, inputs_embeds=lm_features, output_hidden_states=True)
         logits = self.dec_head(dec_out.hidden_states[-1])
 
         # 计算损失
         loss = None
         if labels is not None:
-            lm_feature_length = lm_features.shape[1]
+            #lm_feature_length = lm_features.shape[1]
             
             # no loss for soft prompts
-            no_loss_labels = torch.full((batch_size, lm_feature_length), -100, device=device, dtype=torch.long)
+            no_loss_labels = torch.full((batch_size, seq_length), -100, device=device, dtype=torch.long)
 
             # 将无损失标签与实际标签拼接
             full_labels = torch.cat([no_loss_labels, labels], dim=1)
@@ -156,7 +160,7 @@ class LBBaseModel(ABC, PreTrainedModel):
                 # 重塑损失以匹配批次大小和序列长度
                 loss = rearrange(loss, '(b s) -> b s', b=batch_size)
                 # 移除软提示部分的损失
-                loss = loss[:, lm_feature_length:]
+                loss = loss[:, seq_length:]
 
         return CausalLMOutputWithPast(
             loss=loss,

@@ -9,7 +9,7 @@ NUM_GPU=4
 ARGS="
 --n_gpu $NUM_GPU
 --strategy deepspeed_stage_2
---output_dir checkpoints/metamath-lb
+--output_dir checkpoints/metamath-lb-test
 --run_name metamath-qwen2.5
 --seed 42
 --train_set_path /data1/rzw/CODE/LangBridge/data/metamath-200k
