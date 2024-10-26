@@ -126,7 +126,7 @@ class LBBaseModel(ABC, PreTrainedModel):
 
         # 通过第一个Qwen模型
         enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True)
-        enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index], enc_mask)
+        enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
 
         # 通过MetaMath模型
         # 获取LLaMA模型的前5层输出

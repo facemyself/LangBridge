@@ -27,14 +27,14 @@ logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
 
 
-import debugpy
-try:
-    # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-    debugpy.listen(("localhost", 16236))
-    print("Waiting for debugger attach")
-    debugpy.wait_for_client()
-except Exception as e:
-    pass
+# import debugpy
+# try:
+#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 16236))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, args):
@@ -366,7 +366,7 @@ if __name__ == '__main__':
         from dotenv import load_dotenv
         load_dotenv()
         os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
-        os.environ["WANDB_MODE"] = "offline"
+        #os.environ["WANDB_MODE"] = "offline"
         wandb_logger = WandbLogger(
             project='Multilingual',
             name=training_args.run_name)
