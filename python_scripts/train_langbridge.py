@@ -27,14 +27,14 @@ logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
 
 
-# import debugpy
-# try:
-#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-#     debugpy.listen(("localhost", 16236))
-#     print("Waiting for debugger attach")
-#     debugpy.wait_for_client()
-# except Exception as e:
-#     pass
+import debugpy
+try:
+    # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+    debugpy.listen(("localhost", 16236))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()
+except Exception as e:
+    pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, args):
@@ -228,6 +228,11 @@ class LBTrainingArguments:
     enc_hidden_size: int = field(default=512)
     lm_hidden_size: int = field(default=768)
 
+    enc_output_index: int = field(default=-1)
+    lm_input_index: int = field(default=0)
+    lm_output_index: int = field(default=-1)
+    dec_input_index: int = field(default=0)
+
     train_set_path: str = field(
         default='DKYoon/metamath-200k')
     val_set_path: str = field(
@@ -320,6 +325,10 @@ if __name__ == '__main__':
         freeze_language_model=training_args.freeze_language_model,
         freeze_encoder=training_args.freeze_encoder,
         freeze_decoder=training_args.freeze_decoder,
+        enc_output_index=training_args.enc_output_index,
+        lm_input_index=training_args.lm_input_index,
+        lm_output_index=training_args.lm_output_index,
+        dec_input_index=training_args.dec_input_index,
     )
 
     model_class = LangBridgeModel

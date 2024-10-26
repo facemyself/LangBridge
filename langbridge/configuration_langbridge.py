@@ -13,6 +13,10 @@ class LangBridgeConfig(PretrainedConfig):
         freeze_encoder: bool = True,
         freeze_decoder: bool = True,
         alignments: str = 'linear',
+        enc_output_index: int = -1,
+        lm_input_index: int = -1,
+        lm_output_index: int = -1,
+        dec_input_index: int = -1,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -25,3 +29,7 @@ class LangBridgeConfig(PretrainedConfig):
         self.freeze_encoder = freeze_encoder
         self.freeze_decoder = freeze_decoder
         self.alignments = alignments
+        self.enc_output_index = enc_output_index
+        self.lm_input_index = lm_input_index
+        self.lm_output_index = lm_output_index
+        self.dec_input_index = dec_input_index

@@ -2,14 +2,14 @@
 #export TRANSFORMERS_CACHE=/data1/rzw/CACHE/huggingface/hub
 export HUGGINGFACE_HUB_CACHE=/data1/rzw/CACHE/huggingface/hub
 export CUDA_LAUNCH_BLOCKING=1
-#export CUDA_VISIBLE_DEVICES=7
-NUM_GPU=4
+export CUDA_VISIBLE_DEVICES=7
+NUM_GPU=1
 #google/mt5-xl 
 #facebook/xglm-1.7B
 ARGS="
 --n_gpu $NUM_GPU
 --strategy deepspeed_stage_2
---output_dir checkpoints/metamath-lb
+--output_dir checkpoints/metamath-test
 --run_name metamath-qwen2.5
 --seed 42
 --train_set_path /data1/rzw/CODE/LangBridge/data/metamath-200k
@@ -36,6 +36,10 @@ ARGS="
 --dataloader_num_workers 16
 --bf16 True
 --use_wandb False
+--enc_output_index 27
+--lm_input_index 0
+--lm_output_index 31
+--dec_input_index 0
 "
 
 echo $ARGS

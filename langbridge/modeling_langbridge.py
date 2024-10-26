@@ -46,6 +46,14 @@ class LBBaseModel(ABC, PreTrainedModel):
 
     def __init__(self, config: LangBridgeConfig, random_init=True, suppress_warnings=True):
         super().__init__(config)
+        #输入给Qwen模型的第i层（从0开始计算）
+        self.enc_output_index = config.enc_output_index
+        #输入给LLaMA模型的第i层（从0开始计算）
+        self.lm_input_index = config.lm_input_index
+        #LLaMA模型的第i层输出（从0开始计算）
+        self.lm_output_index = config.lm_output_index
+        #输入给第二个Qwen模型的第i层（从0开始计算）
+        self.dec_input_index = config.dec_input_index
         if 'umt5' in config.enc.lower():
             enc_class = UMT5EncoderModel
         elif 'mt5' in config.enc.lower():
@@ -69,7 +77,7 @@ class LBBaseModel(ABC, PreTrainedModel):
 
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
-            self.alignment_top = LinearWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
+            self.alignment_top = LinearNoEos(dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'ffn':
             self.alignment_bottom = FFNWithAddedEos(dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = FFNWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
@@ -108,38 +116,82 @@ class LBBaseModel(ABC, PreTrainedModel):
         loss_reduction: str = 'mean',
         **kwargs
     ) -> CausalLMOutputWithPast:
-        batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
+        batch_size, seq_length = enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
+
+        if input_ids is not None:
+            enc_ids = torch.cat([enc_ids, input_ids], dim=1)
+            enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
+
+
         # 通过第一个Qwen模型
         enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True)
-        enc_features = self.alignment_bottom(enc_out.hidden_states[-1], enc_mask)
+        enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index], enc_mask)
 
         # 通过MetaMath模型
-        lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True)
-        lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
+        # 获取LLaMA模型的前5层输出
+        lm_hidden_states = []
+        for i in range(self.lm_input_index + 1):
+            lm_hidden_state = torch.zeros_like(enc_features)
+            lm_hidden_states.append(lm_hidden_state)
+        
+        # 将enc_features替换第self.lm_input_index层的输入
+        lm_hidden_states[self.lm_input_index] = enc_features
+        
+        # 从第i层开始继续前向传播
+        for i in range(self.lm_input_index, len(self.lm.layers)):
+            # 根据报错信息，attention_mask的形状应该是(batch_size, 1, seq_len, seq_len)
+            # 我们需要调整enc_mask的形状以匹配这个要求
+            #adjusted_mask = enc_mask.unsqueeze(1).unsqueeze(2).expand(batch_size, 1, enc_features.shape[1], enc_features.shape[1])
+            
+            layer_outputs = self.lm.layers[i](
+                hidden_states=lm_hidden_states[i],
+                #attention_mask=adjusted_mask,
+                output_attentions=False,
+                use_cache=False,
+            )
+            lm_hidden_states.append(layer_outputs[0])
 
-        # 准备第二个Qwen模型的输入
-        if input_ids is not None:
-            embeddings = self.enc_embeddings(input_ids)
-            embeddings = torch.cat([lm_features, embeddings], dim=1)
-            attn_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
-        else:
-            embeddings = lm_features
-            attn_mask = enc_mask
-
+        lm_features = self.alignment_top(lm_hidden_states[self.lm_output_index + 1], enc_mask)
 
 
         # 通过第二个Qwen模型
-        dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=embeddings, output_hidden_states=True)
-        logits = self.dec_head(dec_out.hidden_states[-1])
+        dec_hidden_states = []
+        for i in range(self.dec_input_index + 1):
+            dec_hidden_state = torch.zeros_like(lm_features)
+            dec_hidden_states.append(dec_hidden_state)
+        
+        # 将enc_features替换第self.lm_input_index层的输入
+        dec_hidden_states[self.dec_input_index] = lm_features
+        
+        # 从第i层开始继续前向传播
+        for i in range(self.dec_input_index, len(self.dec.model.layers)):
+            # 根据报错信息，attention_mask的形状应该是(batch_size, 1, seq_len, seq_len)
+            # 我们需要调整enc_mask的形状以匹配这个要求
+            #adjusted_mask = enc_mask.unsqueeze(1).unsqueeze(2).expand(batch_size, 1, enc_features.shape[1], enc_features.shape[1])
+            
+            layer_outputs = self.dec.model.layers[i](
+                hidden_states=dec_hidden_states[i],
+                #attention_mask=adjusted_mask,
+                output_attentions=False,
+                use_cache=False,
+            )
+            dec_hidden_states.append(layer_outputs[0])
+
+
+
+
+
+        # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
+        logits = self.dec_head(dec_hidden_states[-1])
 
         # 计算损失
         loss = None
         if labels is not None:
-            lm_feature_length = lm_features.shape[1]
+            #lm_feature_length = lm_features.shape[1]
             
             # no loss for soft prompts
-            no_loss_labels = torch.full((batch_size, lm_feature_length), -100, device=device, dtype=torch.long)
+            no_loss_labels = torch.full((batch_size, seq_length), -100, device=device, dtype=torch.long)
 
             # 将无损失标签与实际标签拼接
             full_labels = torch.cat([no_loss_labels, labels], dim=1)
@@ -156,13 +208,12 @@ class LBBaseModel(ABC, PreTrainedModel):
                 # 重塑损失以匹配批次大小和序列长度
                 loss = rearrange(loss, '(b s) -> b s', b=batch_size)
                 # 移除软提示部分的损失
-                loss = loss[:, lm_feature_length:]
+                loss = loss[:, seq_length:]
 
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            hidden_states=dec_out.hidden_states,
-            attentions=dec_out.attentions,
+            hidden_states=dec_hidden_states,
         )
 
 
