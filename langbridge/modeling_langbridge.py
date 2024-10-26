@@ -17,6 +17,8 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast
 )
 
+from transformers.models.qwen2.modeling_qwen2 import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
+
 from .configuration_langbridge import LangBridgeConfig
 from .alignment_modules import LinearWithAddedEos, PerceiverResampler, FFNWithAddedEos, LinearNoEos
 
@@ -123,63 +125,89 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_ids = torch.cat([enc_ids, input_ids], dim=1)
             enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
 
-
         # 通过第一个Qwen模型
-        enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True)
+        enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
         enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
 
-        # 通过MetaMath模型
-        # 获取LLaMA模型的前5层输出
-        lm_hidden_states = []
-        for i in range(self.lm_input_index + 1):
-            lm_hidden_state = torch.zeros_like(enc_features)
-            lm_hidden_states.append(lm_hidden_state)
+        # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
+        # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
+
+
+        # # 通过MetaMath模型
+        # lm_hidden_states = [torch.zeros_like(enc_features) for _ in range(self.lm_input_index + 1)]
+        # lm_hidden_states[self.lm_input_index] = enc_features
         
-        # 将enc_features替换第self.lm_input_index层的输入
-        lm_hidden_states[self.lm_input_index] = enc_features
-        
+        past_key_values_length = 0
+        position_ids = torch.arange(
+            past_key_values_length, enc_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
+        )
+        position_ids = position_ids.unsqueeze(0).view(-1, enc_features.shape[1])
+
+        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                enc_mask,
+                (batch_size, enc_features.shape[1]),
+                enc_features,
+                past_key_values_length,
+            )
+        lm_hidden_states = ()
+        for i in range(self.lm_input_index):
+            lm_hidden_states += (torch.zeros_like(enc_features),)
+        lm_hidden_state = enc_features
         # 从第i层开始继续前向传播
         for i in range(self.lm_input_index, len(self.lm.layers)):
-            # 根据报错信息，attention_mask的形状应该是(batch_size, 1, seq_len, seq_len)
-            # 我们需要调整enc_mask的形状以匹配这个要求
-            #adjusted_mask = enc_mask.unsqueeze(1).unsqueeze(2).expand(batch_size, 1, enc_features.shape[1], enc_features.shape[1])
-            
+            lm_hidden_states += (lm_hidden_state,)
             layer_outputs = self.lm.layers[i](
-                hidden_states=lm_hidden_states[i],
-                #attention_mask=adjusted_mask,
+                lm_hidden_state,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=None,
                 output_attentions=False,
                 use_cache=False,
             )
-            lm_hidden_states.append(layer_outputs[0])
+            lm_hidden_state = layer_outputs[0]
+        lm_hidden_state = self.lm.norm(lm_hidden_state)
+        lm_hidden_states += (lm_hidden_state,)
 
+        assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
         lm_features = self.alignment_top(lm_hidden_states[self.lm_output_index + 1], enc_mask)
 
 
         # 通过第二个Qwen模型
-        dec_hidden_states = []
-        for i in range(self.dec_input_index + 1):
-            dec_hidden_state = torch.zeros_like(lm_features)
-            dec_hidden_states.append(dec_hidden_state)
+        dec_hidden_states = ()
+        for i in range(self.dec_input_index):
+            dec_hidden_states += (torch.zeros_like(lm_features),)
+
+        #dec_hidden_states[self.dec_input_index] = lm_features
+        # past_key_values_length = 0
+        # position_ids = torch.arange(
+        #     past_key_values_length, lm_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
+        # )
+        # position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
         
-        # 将enc_features替换第self.lm_input_index层的输入
-        dec_hidden_states[self.dec_input_index] = lm_features
         
+        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                enc_mask,
+                (batch_size, lm_features.shape[1]),
+                lm_features,
+                past_key_values_length,
+            )
         # 从第i层开始继续前向传播
+        dec_hidden_state = lm_features
         for i in range(self.dec_input_index, len(self.dec.model.layers)):
-            # 根据报错信息，attention_mask的形状应该是(batch_size, 1, seq_len, seq_len)
-            # 我们需要调整enc_mask的形状以匹配这个要求
-            #adjusted_mask = enc_mask.unsqueeze(1).unsqueeze(2).expand(batch_size, 1, enc_features.shape[1], enc_features.shape[1])
-            
+            dec_hidden_states += (dec_hidden_state,)
             layer_outputs = self.dec.model.layers[i](
-                hidden_states=dec_hidden_states[i],
-                #attention_mask=adjusted_mask,
+                dec_hidden_state,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=None,
                 output_attentions=False,
                 use_cache=False,
             )
-            dec_hidden_states.append(layer_outputs[0])
+            dec_hidden_state = layer_outputs[0]
+        dec_hidden_state = self.dec.model.norm(dec_hidden_state)
+        dec_hidden_states += (dec_hidden_state,)
 
-
-
+        assert len(dec_hidden_states) == len(self.dec.model.layers) + 1, "hidden states length mismatch"
 
 
         # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)

@@ -228,9 +228,9 @@ class LBTrainingArguments:
     enc_hidden_size: int = field(default=512)
     lm_hidden_size: int = field(default=768)
 
-    enc_output_index: int = field(default=-1)
+    enc_output_index: int = field(default=27)
     lm_input_index: int = field(default=0)
-    lm_output_index: int = field(default=-1)
+    lm_output_index: int = field(default=31)
     dec_input_index: int = field(default=0)
 
     train_set_path: str = field(
