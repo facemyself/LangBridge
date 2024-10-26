@@ -37,11 +37,10 @@ hf_logging.set_verbosity_error()
 #     pass
 
 class AlignLBModule(LightningModule):
-    def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
+    def __init__(self, model, enc_tokenizer, args):
         super().__init__()
         self.model: LangBridgeModel = model
         self.enc_tokenizer = enc_tokenizer
-        self.lm_tokenizer = lm_tokenizer
         self.args = args
         self.save_hyperparameters(asdict(args))
         self.sync_dist = True if self.args.n_gpu > 1 else False
@@ -99,7 +98,7 @@ class AlignLBModule(LightningModule):
 
     def on_fit_end(self):
         if self.global_rank == 0 and self.global_step > 0:
-            save_name = f'epoch={self.current_epoch}-step={self.global_step}'
+            save_name = f'epoch={self.current_epoch}'
             self.model.save_pretrained(
                 f'{self.args.output_dir}/{save_name}', safe_serialization=False)
 
@@ -158,10 +157,10 @@ class AlignLBModule(LightningModule):
         actual_enc_length = enc_tokens['input_ids'].shape[1]
         lm_max_length = self.total_max_length - actual_enc_length
 
-        lm_tokens = self.lm_tokenizer(
+        lm_tokens = self.enc_tokenizer(
             outputs, padding=True, truncation=True, max_length=lm_max_length, return_tensors='pt')
         labels = lm_tokens['input_ids'].clone().detach()
-        labels[labels == self.lm_tokenizer.pad_token_id] = -100
+        labels[labels == self.enc_tokenizer.pad_token_id] = -100
 
         return {
             'enc_ids': enc_tokens['input_ids'],
@@ -304,19 +303,11 @@ if __name__ == '__main__':
     # this must be a FastTokenizer to use dynamic length
     enc_tokenizer = AutoTokenizer.from_pretrained(
         training_args.enc_name_or_path, use_fast=True)
-    try:
-        lm_tokenizer = AutoTokenizer.from_pretrained(
-            training_args.lm_name_or_path, use_fast=False)
-    except:
-        lm_tokenizer = AutoTokenizer.from_pretrained(
-            training_args.lm_name_or_path)
 
-    lm_tokenizer.padding_side = 'right'
+    enc_tokenizer.padding_side = 'right'
 
     if not enc_tokenizer.pad_token:
         enc_tokenizer.pad_token = enc_tokenizer.eos_token
-    if not lm_tokenizer.pad_token:
-        lm_tokenizer.pad_token = lm_tokenizer.eos_token
 
     logger.info('loading model...')
 
@@ -361,8 +352,7 @@ if __name__ == '__main__':
 
     if not training_args.eval_only:
         model.train()
-    pl_model = AlignLBModule(model, enc_tokenizer,
-                             lm_tokenizer, training_args)
+    pl_model = AlignLBModule(model, enc_tokenizer,training_args)
     if training_args.use_wandb:
         from dotenv import load_dotenv
         load_dotenv()

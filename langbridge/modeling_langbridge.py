@@ -38,7 +38,8 @@ class LBBaseModel(ABC, PreTrainedModel):
     config: LangBridgeConfig
     enc: PreTrainedModel
     lm: PreTrainedModel
-    lm_head: nn.Linear
+    dec: PreTrainedModel
+    dec_head: nn.Linear
     enc_embeddings: nn.Embedding
 
     config_class = LangBridgeConfig
@@ -56,36 +57,25 @@ class LBBaseModel(ABC, PreTrainedModel):
         else:
             enc_class = AutoModel
 
-        #with suppress_model_loading_warnings(suppress_warnings):
         if random_init:
-            enc_config = AutoConfig.from_pretrained(
-                config.enc)
+            enc_config = AutoConfig.from_pretrained(config.enc)
             self.enc = enc_class(config=enc_config)
         else:
             print('loading encoder from pretrained')
             self.enc = enc_class.from_pretrained(config.enc)
             self.enc_embeddings = self.enc.get_input_embeddings()
-            print(self.enc)
             self.dec = enc_class.from_pretrained(config.enc)
             self.dec_head = self.dec.lm_head
-        # self.enc.gradient_checkpointing_enable(
-            # gradient_checkpointing_kwargs={'use_reentrant': False})
 
-        if config.alignments == 'linear':  # default
-            self.alignment_bottom = LinearNoEos(
-                dim=config.dim_enc, out_dim=config.dim_lm)
-            self.alignment_top = LinearWithAddedEos(
-                dim=config.dim_lm, out_dim=config.dim_enc)
-        elif config.alignments == 'ffn':  # mlp
-            self.alignment_bottom = FFNWithAddedEos(
-                dim=config.dim_enc, out_dim=config.dim_lm)
-            self.alignment_top = FFNWithAddedEos(
-                dim=config.dim_lm, out_dim=config.dim_enc)
+        if config.alignments == 'linear':
+            self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_top = LinearWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
+        elif config.alignments == 'ffn':
+            self.alignment_bottom = FFNWithAddedEos(dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_top = FFNWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'latent':
-            self.alignment_bottom = PerceiverResampler(
-                dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
-            self.alignment_top = PerceiverResampler(
-                dim=config.dim_lm, out_dim=config.dim_enc, num_latents=config.num_latents)
+            self.alignment_bottom = PerceiverResampler(dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
+            self.alignment_top = PerceiverResampler(dim=config.dim_lm, out_dim=config.dim_enc, num_latents=config.num_latents)
         else:
             raise ValueError(
                 f'unknown alignment type {config.alignments}')
@@ -108,149 +98,69 @@ class LBBaseModel(ABC, PreTrainedModel):
         for param in self.lm.parameters():
             param.requires_grad = True
 
-    # get soft prompts
-    def get_encoder_features(self, enc_ids: torch.Tensor, enc_mask: torch.Tensor, index: int) -> torch.Tensor:
-        if self.config.freeze_encoder:
-            with torch.no_grad():
-                enc_features = self.enc(
-                    input_ids=enc_ids, attention_mask=enc_mask).hidden_state[index]  # (b, s, d)
-        else:
-            enc_features = self.enc(
-                input_ids=enc_ids, attention_mask=enc_mask).hidden_state[index]
-        enc_features = self.alignment_bottom(enc_features, enc_mask)
-        return enc_features
-    
-    def get_lm_features(self, lm_ids: torch.Tensor, lm_mask: torch.Tensor, index: int) -> torch.Tensor:
-        if self.config.freeze_encoder:
-            with torch.no_grad():
-                lm_features = self.lm(
-                    input_ids=lm_ids, attention_mask=lm_mask).hidden_state[index]  # (b, s, d)
-        else:
-            lm_features = self.lm(
-                input_ids=lm_ids, attention_mask=lm_mask).hidden_state[index]
-        lm_features = self.alignment_top(lm_features, lm_mask)
-        return lm_features
     def forward(
         self,
-        enc_ids: torch.Tensor | None = None,
-        enc_mask: torch.Tensor | None = None,
+        enc_ids: torch.Tensor,
+        enc_mask: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        use_cache: bool = True,
-        past_key_values: tuple | None = None,
-        return_dict: bool = True,
         labels: torch.Tensor | None = None,
         loss_reduction: str = 'mean',
         **kwargs
     ) -> CausalLMOutputWithPast:
-        # sanity check
-        assert return_dict, "can only use return_dict=True at the moment!"
-
-        # find the input shape
         batch_size, seq_length = input_ids.shape[:2] if input_ids is not None else enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-        if past_key_values is None:
-            enc_past_key_values, lm_past_key_values, dec_past_key_values = None, None, None
-        else:
-            enc_past_key_values, lm_past_key_values, dec_past_key_values = past_key_values[0], past_key_values[1], past_key_values[2]
+        # 通过第一个Qwen模型
+        enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True)
+        enc_features = self.alignment_bottom(enc_out.hidden_states[-1], enc_mask)
 
+        # 通过MetaMath模型
+        lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True)
+        lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
+
+        # 准备第二个Qwen模型的输入
         if input_ids is not None:
             embeddings = self.enc_embeddings(input_ids)
-        bos_shifted = False
-        #kwargs.pop('past_key_values', None)
-        enc_out = self.enc(input_ids=enc_ids,
-                            attention_mask=enc_mask, output_hidden_states=True)
-        # 使用 hidden_states 而不是 last_hidden_state
-        enc_features = self.alignment_bottom(enc_out.hidden_states[-1], enc_mask) 
-        
-
-        # pass through LM
-        lm_out: BaseModelOutputWithPast = self.lm(
-            attention_mask=enc_mask,
-            inputs_embeds=enc_features,
-            use_cache=use_cache,
-            past_key_values=lm_past_key_values,
-            return_dict=True,
-            **kwargs
-        )
-
-        lm_features = self.alignment_top(lm_out.last_hidden_state, enc_mask)  # 使用self.LLM的最后一层hidden state
-        if dec_past_key_values is None:
-            if input_ids is not None:
-                first_input_ids = input_ids[:, 0]
-                if all(first_input_ids == self.dec.config.bos_token_id):
-                    # move bos embedding to the front
-                    bos_shifted = True
-                    embeddings = torch.cat(
-                        [embeddings[:, 0].unsqueeze(dim=1), lm_features, embeddings[:, 1:]], dim=1)
-                else:
-                    embeddings = torch.cat([lm_features, embeddings], dim=1)
-            
-            else:
-                embeddings = lm_features             
-            lm_feature_length = lm_features.shape[1]            
+            embeddings = torch.cat([lm_features, embeddings], dim=1)
+            attn_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
         else:
-            lm_feature_length = past_key_values[3]
-
-        if input_ids is not None:
-            if self.config.alignments not in ['linear', 'ffn']:
-                attn_mask = torch.cat(
-                    [torch.ones((batch_size, lm_feature_length), device=device, dtype=torch.long), attention_mask], dim=1)
-            else:
-                # use the encoder masks for the soft prompts
-                if bos_shifted:
-                    # TODO: messy code
-                    # torch.ones are there since the alignment adds a single learnable eos token at the enc
-                    attn_mask = torch.cat(
-                        [attention_mask[:, 0].unsqueeze(dim=1), enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask[:, 1:]], dim=1)
-                else:
-                    attn_mask = torch.cat(
-                        [enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
-        else:
+            embeddings = lm_features
             attn_mask = enc_mask
-        # pass through decoder
-        dec_out: BaseModelOutputWithPast = self.dec(
-            attention_mask=attn_mask,
-            inputs_embeds=embeddings,
-            use_cache=use_cache,
-            past_key_values=dec_past_key_values,
-            return_dict=True,
-            output_hidden_states=True,
-            **kwargs
-        )
 
-        logits: torch.Tensor = self.dec_head(dec_out.hidden_states[-1])  # 使用self.dec的head生成最终的word
 
+
+        # 通过第二个Qwen模型
+        dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=embeddings, output_hidden_states=True)
+        logits = self.dec_head(dec_out.hidden_states[-1])
+
+        # 计算损失
         loss = None
         if labels is not None:
+            lm_feature_length = lm_features.shape[1]
+            
             # no loss for soft prompts
-            no_loss_labels = torch.zeros(
-                (batch_size, lm_feature_length), device=device, dtype=torch.long) + -100
+            no_loss_labels = torch.full((batch_size, lm_feature_length), -100, device=device, dtype=torch.long)
 
-            if bos_shifted:
-                full_labels = torch.cat(
-                    [labels[:, 0].unsqueeze(dim=1), no_loss_labels, labels[:, 1:]], dim=1)
-            else:
-                full_labels = torch.cat(
-                    [no_loss_labels, labels], dim=1)
-            # logits shape (batch, seq_length, #words)
+            # 将无损失标签与实际标签拼接
+            full_labels = torch.cat([no_loss_labels, labels], dim=1)
+            
+            # 准备计算损失的logits和labels
             shift_logits = logits[..., :-1, :].contiguous()
-            # labels shape (batch, seq_length)
             shift_labels = full_labels[..., 1:].contiguous()
 
-            # Flatten the tokens
+            # 计算损失
             loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
                                    shift_labels.view(-1), reduction=loss_reduction)
+            
             if loss_reduction == 'none':
-                # CrossEntropyLoss will flatten all dimensions by default
+                # 重塑损失以匹配批次大小和序列长度
                 loss = rearrange(loss, '(b s) -> b s', b=batch_size)
-                # remove soft promtps from loss
+                # 移除软提示部分的损失
                 loss = loss[:, lm_feature_length:]
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=(enc_out.past_key_values, lm_out.past_key_values, dec_out.past_key_values,
-                             lm_feature_length) if use_cache else None,
             hidden_states=dec_out.hidden_states,
             attentions=dec_out.attentions,
         )
@@ -345,6 +255,7 @@ class LBMistral(LBBaseModel):
         self.lm: MistralModel = base_lm.model
         self.lm_head = base_lm.lm_head
         self.embeddings = base_lm.get_input_embeddings()
+
 
 
 class LangBridgeModel(PreTrainedModel):
@@ -481,7 +392,6 @@ class LangBridgeModel(PreTrainedModel):
     def generate_from_prefix(
         self,
         enc_tokenizer: PreTrainedTokenizer,
-        lm_tokenizer: PreTrainedTokenizer,
         prompts: List[str],
         **kwargs
     ):
@@ -489,7 +399,7 @@ class LangBridgeModel(PreTrainedModel):
         enc_ids = enc_input['input_ids'].to(self.device)
         enc_mask = enc_input['attention_mask'].to(self.device)
 
-        input_ids = torch.LongTensor([lm_tokenizer.bos_token_id])
+        input_ids = torch.LongTensor([enc_tokenizer.bos_token_id])
         input_ids = input_ids.repeat(enc_ids.shape[0], 1).to(self.device)
         attention_mask = torch.ones_like(input_ids)
 
@@ -500,13 +410,13 @@ class LangBridgeModel(PreTrainedModel):
             enc_mask=enc_mask,
             early_stopping=True,
             use_cache=True,
-            bos_token_id=lm_tokenizer.bos_token_id,
-            eos_token_id=32002,  # <|im_end|>
-            pad_token_id=lm_tokenizer.eos_token_id,
+            bos_token_id=enc_tokenizer.bos_token_id,
+            eos_token_id=enc_tokenizer.eos_token_id,
+            pad_token_id=enc_tokenizer.eos_token_id,
             **kwargs
         )
 
-        completions = lm_tokenizer.batch_decode(
+        completions = enc_tokenizer.batch_decode(
             out_ids, skip_special_tokens=True)
         # TODO: don't know why batch_decode doesn't remove <|im_end|>, since it's in the special tokens
         completions = [s.replace('<|im_end|>', '') for s in completions]

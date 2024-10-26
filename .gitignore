@@ -142,3 +142,5 @@ dmypy.json
 
 .env
 python_scripts/lightning_logs/
+python_scripts/Logs
+python_scripts/checkpoints
