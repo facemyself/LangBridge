@@ -19,7 +19,7 @@ from transformers.utils import logging as hf_logging
 import sys
 sys.path.append('/data1/rzw/CODE/LangBridge/')
 from langbridge import LangBridgeModel, LangBridgeConfig
-from dataset import Data
+from dataset import MathDataset, read_lego, Data
 
 torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
@@ -30,22 +30,24 @@ hf_logging.set_verbosity_error()
 # import debugpy
 # try:
 #     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-#     debugpy.listen(("localhost", 16236))
+#     debugpy.listen(("localhost", 16233))
 #     print("Waiting for debugger attach")
 #     debugpy.wait_for_client()
 # except Exception as e:
 #     pass
 
 class AlignLBModule(LightningModule):
-    def __init__(self, model, enc_tokenizer, args):
+    def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
         super().__init__()
         self.model: LangBridgeModel = model
         self.enc_tokenizer = enc_tokenizer
+        self.lm_tokenizer = lm_tokenizer
         self.args = args
         self.save_hyperparameters(asdict(args))
         self.sync_dist = True if self.args.n_gpu > 1 else False
 
         self.total_max_length = self.args.max_length + self.args.max_length_enc
+        self.training_stage = self.args.training_stage
 
     def forward(self, **kwargs):
         return self.model(**kwargs)
@@ -103,6 +105,7 @@ class AlignLBModule(LightningModule):
                 f'{self.args.output_dir}/{save_name}', safe_serialization=False)
 
     def collate_fn(self, batch, use_dynamic=False):
+        raise NotImplementedError("not implemented")
         if use_dynamic:
             enc_length, max_length = self.adjust_enc_length()
         else:
@@ -134,17 +137,24 @@ class AlignLBModule(LightningModule):
         except IndexError:
             print(len(no_output_data), offsets.shape)
             raise IndexError
-        # enc_tokenizer is same as dec_tokenizer
-        dec_tokens = self.enc_tokenizer(
-            suffix, max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
-        labels = dec_tokens['input_ids'].clone().detach()
-        labels[labels == self.enc_tokenizer.pad_token_id] = -100
+        if self.args.training_stage == 1:
+            output_tokens = self.lm_tokenizer(
+                suffix, max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
+            labels = output_tokens['input_ids'].clone().detach()
+            labels[labels == self.lm_tokenizer.pad_token_id] = -100
+        else:
+            # enc_tokenizer is same as dec_tokenizer
+            output_tokens = self.enc_tokenizer(
+                suffix, max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
+            
+            labels = output_tokens['input_ids'].clone().detach()
+            labels[labels == self.enc_tokenizer.pad_token_id] = -100
 
         return {
             'enc_ids': enc_input_ids,
             'enc_mask': enc_attention_mask,
-            'input_ids': dec_tokens['input_ids'],
-            'attention_mask': dec_tokens['attention_mask'],
+            'input_ids': output_tokens['input_ids'],
+            'attention_mask': output_tokens['attention_mask'],
             'labels': labels,
         }
 
@@ -155,18 +165,24 @@ class AlignLBModule(LightningModule):
         enc_tokens = self.enc_tokenizer(
             inputs, padding=True, truncation=True, max_length=self.args.max_length_enc, return_tensors='pt')
         actual_enc_length = enc_tokens['input_ids'].shape[1]
-        lm_max_length = self.total_max_length - actual_enc_length
+        max_length = self.total_max_length - actual_enc_length
 
-        lm_tokens = self.enc_tokenizer(
-            outputs, padding=True, truncation=True, max_length=lm_max_length, return_tensors='pt')
-        labels = lm_tokens['input_ids'].clone().detach()
-        labels[labels == self.enc_tokenizer.pad_token_id] = -100
+        if self.args.training_stage == 1:
+            output_tokens = self.lm_tokenizer(
+                outputs, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
+            labels = output_tokens['input_ids'].clone().detach()
+            labels[labels == self.lm_tokenizer.pad_token_id] = -100
+        else:
+            output_tokens = self.enc_tokenizer(
+                outputs, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
+            labels = output_tokens['input_ids'].clone().detach()
+            labels[labels == self.enc_tokenizer.pad_token_id] = -100
 
         return {
             'enc_ids': enc_tokens['input_ids'],
             'enc_mask': enc_tokens['attention_mask'],
-            'input_ids': lm_tokens['input_ids'],
-            'attention_mask': lm_tokens['attention_mask'],
+            'input_ids': output_tokens['input_ids'],
+            'attention_mask': output_tokens['attention_mask'],
             'labels': labels,
         }
 
@@ -184,8 +200,13 @@ class AlignLBModule(LightningModule):
         return enc_length, max_length
 
     def train_dataloader(self):
-        train_dataset = Data(
-            self.args.train_set_path, split='train')
+        if self.args.training_stage == 1:
+            train_set = read_lego(10000)
+            train_dataset = MathDataset(train_set, self.args.training_stage)
+        else:
+            train_dataset = Data(
+                self.args.train_set_path, split='train')
+            raise NotImplementedError("not implemented")
 
         if self.args.output_exists:  # labeled finetuning data
             def collate_fn(batch): return self.collate_fn_output_exists(
@@ -274,6 +295,8 @@ class LBTrainingArguments:
     gradient_clip_val: float = field(default=1.0)
     bf16: bool = field(default=True)
 
+    training_stage: int = field(default=1)
+
     use_wandb: bool = field(default=True)
 
 if __name__ == '__main__':
@@ -308,11 +331,19 @@ if __name__ == '__main__':
     # this must be a FastTokenizer to use dynamic length
     enc_tokenizer = AutoTokenizer.from_pretrained(
         training_args.enc_name_or_path, use_fast=True)
-
+    try:
+        lm_tokenizer = AutoTokenizer.from_pretrained(
+            training_args.lm_name_or_path, use_fast=False)
+    except:
+        lm_tokenizer = AutoTokenizer.from_pretrained(
+            training_args.lm_name_or_path)
+    lm_tokenizer.padding_side = 'right'
     enc_tokenizer.padding_side = 'right'
 
     if not enc_tokenizer.pad_token:
         enc_tokenizer.pad_token = enc_tokenizer.eos_token
+    if not lm_tokenizer.pad_token:
+        lm_tokenizer.pad_token = lm_tokenizer.eos_token
 
     logger.info('loading model...')
 
@@ -329,6 +360,7 @@ if __name__ == '__main__':
         lm_input_index=training_args.lm_input_index,
         lm_output_index=training_args.lm_output_index,
         dec_input_index=training_args.dec_input_index,
+        training_stage=training_args.training_stage,
     )
 
     model_class = LangBridgeModel
@@ -361,14 +393,14 @@ if __name__ == '__main__':
 
     if not training_args.eval_only:
         model.train()
-    pl_model = AlignLBModule(model, enc_tokenizer,training_args)
+    pl_model = AlignLBModule(model, enc_tokenizer, lm_tokenizer, training_args)
     if training_args.use_wandb:
         from dotenv import load_dotenv
         load_dotenv()
         os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
-        #os.environ["WANDB_MODE"] = "offline"
+        os.environ["WANDB_MODE"] = "offline"
         wandb_logger = WandbLogger(
-            project='Multilingual',
+            project=f'Multilingual-{training_args.training_stage}',
             name=training_args.run_name)
     else:
         wandb_logger = None

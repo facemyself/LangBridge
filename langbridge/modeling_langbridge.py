@@ -40,6 +40,7 @@ class LBBaseModel(ABC, PreTrainedModel):
     config: LangBridgeConfig
     enc: PreTrainedModel
     lm: PreTrainedModel
+    lm_head: nn.Linear
     dec: PreTrainedModel
     dec_head: nn.Linear
     enc_embeddings: nn.Embedding
@@ -48,6 +49,7 @@ class LBBaseModel(ABC, PreTrainedModel):
 
     def __init__(self, config: LangBridgeConfig, random_init=True, suppress_warnings=True):
         super().__init__(config)
+        self.training_stage = config.training_stage
         #输入给Qwen模型的第i层（从0开始计算）
         self.enc_output_index = config.enc_output_index
         #输入给LLaMA模型的第i层（从0开始计算）
@@ -121,128 +123,211 @@ class LBBaseModel(ABC, PreTrainedModel):
         batch_size, seq_length = enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
 
-        if input_ids is not None:
-            enc_ids = torch.cat([enc_ids, input_ids], dim=1)
-            enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
-
-        # 通过第一个Qwen模型
-        enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
-        enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
-
-        # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
-        # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
-
-
-        # # 通过MetaMath模型
-        # lm_hidden_states = [torch.zeros_like(enc_features) for _ in range(self.lm_input_index + 1)]
-        # lm_hidden_states[self.lm_input_index] = enc_features
         
-        past_key_values_length = 0
-        position_ids = torch.arange(
-            past_key_values_length, enc_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
-        )
-        position_ids = position_ids.unsqueeze(0).view(-1, enc_features.shape[1])
 
-        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                enc_mask,
-                (batch_size, enc_features.shape[1]),
-                enc_features,
-                past_key_values_length,
+
+        if self.training_stage == 1:
+            # 通过第一个Qwen模型
+            
+            enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
+            enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
+            # 通过llama模型              
+            if input_ids is not None:
+                embeddings = self.embeddings(input_ids)
+                embeddings = torch.cat([enc_features, embeddings], dim=1)
+                attn_mask = torch.cat(
+                        [enc_mask, attention_mask], dim=1)
+            else:
+                embeddings = enc_features
+                attn_mask = enc_mask
+            past_key_values_length = 0
+            position_ids = torch.arange(
+                past_key_values_length, embeddings.shape[1] + past_key_values_length, dtype=torch.long, device=device
             )
-        lm_hidden_states = ()
-        for i in range(self.lm_input_index):
-            lm_hidden_states += (torch.zeros_like(enc_features),)
-        lm_hidden_state = enc_features
-        # 从第i层开始继续前向传播
-        for i in range(self.lm_input_index, len(self.lm.layers)):
+            position_ids = position_ids.unsqueeze(0).view(-1, embeddings.shape[1])
+
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    attn_mask,
+                    (batch_size, embeddings.shape[1]),
+                    embeddings,
+                    past_key_values_length,
+                )
+            lm_hidden_states = ()
+            for i in range(self.lm_input_index):
+                lm_hidden_states += (torch.zeros_like(embeddings),)
+            lm_hidden_state = embeddings
+            # 从第i层开始继续前向传播
+            for i in range(self.lm_input_index, len(self.lm.layers)):
+                lm_hidden_states += (lm_hidden_state,)
+                layer_outputs = self.lm.layers[i](
+                    lm_hidden_state,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                lm_hidden_state = layer_outputs[0]
+            lm_hidden_state = self.lm.norm(lm_hidden_state)
             lm_hidden_states += (lm_hidden_state,)
-            layer_outputs = self.lm.layers[i](
-                lm_hidden_state,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=None,
-                output_attentions=False,
-                use_cache=False,
-            )
-            lm_hidden_state = layer_outputs[0]
-        lm_hidden_state = self.lm.norm(lm_hidden_state)
-        lm_hidden_states += (lm_hidden_state,)
 
-        assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
-        lm_features = self.alignment_top(lm_hidden_states[self.lm_output_index + 1], enc_mask)
-
-
-        # 通过第二个Qwen模型
-        dec_hidden_states = ()
-        for i in range(self.dec_input_index):
-            dec_hidden_states += (torch.zeros_like(lm_features),)
-
-        #dec_hidden_states[self.dec_input_index] = lm_features
-        # past_key_values_length = 0
-        # position_ids = torch.arange(
-        #     past_key_values_length, lm_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
-        # )
-        # position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
-        
-        
-        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                enc_mask,
-                (batch_size, lm_features.shape[1]),
-                lm_features,
-                past_key_values_length,
-            )
-        # 从第i层开始继续前向传播
-        dec_hidden_state = lm_features
-        for i in range(self.dec_input_index, len(self.dec.model.layers)):
-            dec_hidden_states += (dec_hidden_state,)
-            layer_outputs = self.dec.model.layers[i](
-                dec_hidden_state,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=None,
-                output_attentions=False,
-                use_cache=False,
-            )
-            dec_hidden_state = layer_outputs[0]
-        dec_hidden_state = self.dec.model.norm(dec_hidden_state)
-        dec_hidden_states += (dec_hidden_state,)
-
-        assert len(dec_hidden_states) == len(self.dec.model.layers) + 1, "hidden states length mismatch"
-
-
-        # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
-        logits = self.dec_head(dec_hidden_states[-1])
-
-        # 计算损失
-        loss = None
-        if labels is not None:
-            #lm_feature_length = lm_features.shape[1]
-            
-            # no loss for soft prompts
-            no_loss_labels = torch.full((batch_size, seq_length), -100, device=device, dtype=torch.long)
-
-            # 将无损失标签与实际标签拼接
-            full_labels = torch.cat([no_loss_labels, labels], dim=1)
-            
-            # 准备计算损失的logits和labels
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = full_labels[..., 1:].contiguous()
+            assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
+            # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
+            logits = self.lm_head(lm_hidden_states[-1])
 
             # 计算损失
-            loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
-                                   shift_labels.view(-1), reduction=loss_reduction)
-            
-            if loss_reduction == 'none':
-                # 重塑损失以匹配批次大小和序列长度
-                loss = rearrange(loss, '(b s) -> b s', b=batch_size)
-                # 移除软提示部分的损失
-                loss = loss[:, seq_length:]
+            loss = None
+            if labels is not None:
+                #lm_feature_length = lm_features.shape[1]
+                
+                # no loss for soft prompts
+                no_loss_labels = torch.full((batch_size, seq_length), -100, device=device, dtype=torch.long)
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            hidden_states=dec_hidden_states,
-        )
+                # 将无损失标签与实际标签拼接
+                full_labels = torch.cat([no_loss_labels, labels], dim=1)
+                
+                # 准备计算损失的logits和labels
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = full_labels[..., 1:].contiguous()
+
+                # 计算损失
+                loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
+                                    shift_labels.view(-1), reduction=loss_reduction)
+                
+                if loss_reduction == 'none':
+                    # 重塑损失以匹配批次大小和序列长度
+                    loss = rearrange(loss, '(b s) -> b s', b=batch_size)
+                    # 移除软提示部分的损失
+                    loss = loss[:, seq_length:]
+
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                hidden_states=lm_hidden_states,
+            )
+
+        else:
+            if input_ids is not None:
+                enc_ids = torch.cat([enc_ids, input_ids], dim=1)
+                enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
+            # 通过第一个Qwen模型
+            enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
+            enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
+
+            # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
+            # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
+
+
+            # # 通过MetaMath模型
+            # lm_hidden_states = [torch.zeros_like(enc_features) for _ in range(self.lm_input_index + 1)]
+            # lm_hidden_states[self.lm_input_index] = enc_features
+            
+            past_key_values_length = 0
+            position_ids = torch.arange(
+                past_key_values_length, enc_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, enc_features.shape[1])
+
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    enc_mask,
+                    (batch_size, enc_features.shape[1]),
+                    enc_features,
+                    past_key_values_length,
+                )
+            lm_hidden_states = ()
+            for i in range(self.lm_input_index):
+                lm_hidden_states += (torch.zeros_like(enc_features),)
+            lm_hidden_state = enc_features
+            # 从第i层开始继续前向传播
+            for i in range(self.lm_input_index, len(self.lm.layers)):
+                lm_hidden_states += (lm_hidden_state,)
+                layer_outputs = self.lm.layers[i](
+                    lm_hidden_state,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                lm_hidden_state = layer_outputs[0]
+            lm_hidden_state = self.lm.norm(lm_hidden_state)
+            lm_hidden_states += (lm_hidden_state,)
+
+            assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
+            lm_features = self.alignment_top(lm_hidden_states[self.lm_output_index + 1], enc_mask)
+
+
+            # 通过第二个Qwen模型
+            dec_hidden_states = ()
+            for i in range(self.dec_input_index):
+                dec_hidden_states += (torch.zeros_like(lm_features),)
+
+            #dec_hidden_states[self.dec_input_index] = lm_features
+            # past_key_values_length = 0
+            # position_ids = torch.arange(
+            #     past_key_values_length, lm_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
+            # )
+            # position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
+            
+            
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    enc_mask,
+                    (batch_size, lm_features.shape[1]),
+                    lm_features,
+                    past_key_values_length,
+                )
+            # 从第i层开始继续前向传播
+            dec_hidden_state = lm_features
+            for i in range(self.dec_input_index, len(self.dec.model.layers)):
+                dec_hidden_states += (dec_hidden_state,)
+                layer_outputs = self.dec.model.layers[i](
+                    dec_hidden_state,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                dec_hidden_state = layer_outputs[0]
+            dec_hidden_state = self.dec.model.norm(dec_hidden_state)
+            dec_hidden_states += (dec_hidden_state,)
+
+            assert len(dec_hidden_states) == len(self.dec.model.layers) + 1, "hidden states length mismatch"
+
+
+            # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
+            logits = self.dec_head(dec_hidden_states[-1])
+
+            # 计算损失
+            loss = None
+            if labels is not None:
+                #lm_feature_length = lm_features.shape[1]
+                
+                # no loss for soft prompts
+                no_loss_labels = torch.full((batch_size, seq_length), -100, device=device, dtype=torch.long)
+
+                # 将无损失标签与实际标签拼接
+                full_labels = torch.cat([no_loss_labels, labels], dim=1)
+                
+                # 准备计算损失的logits和labels
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = full_labels[..., 1:].contiguous()
+
+                # 计算损失
+                loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
+                                    shift_labels.view(-1), reduction=loss_reduction)
+                
+                if loss_reduction == 'none':
+                    # 重塑损失以匹配批次大小和序列长度
+                    loss = rearrange(loss, '(b s) -> b s', b=batch_size)
+                    # 移除软提示部分的损失
+                    loss = loss[:, seq_length:]
+
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                hidden_states=dec_hidden_states,
+            )
 
 
 # used for debbuging with opt-125m
