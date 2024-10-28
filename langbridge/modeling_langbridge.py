@@ -72,13 +72,14 @@ class LBBaseModel(ABC, PreTrainedModel):
         if random_init:
             enc_config = AutoConfig.from_pretrained(config.enc)
             self.enc = enc_class(config=enc_config)
+            self.dec = enc_class(config=enc_config)
         else:
             print('loading encoder from pretrained')
             self.enc = enc_class.from_pretrained(config.enc)
-            self.enc_embeddings = self.enc.get_input_embeddings()
             self.dec = enc_class.from_pretrained(config.enc)
-            self.dec_head = self.dec.lm_head
-
+            
+        self.enc_embeddings = self.enc.get_input_embeddings()
+        self.dec_head = self.dec.lm_head
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = LinearNoEos(dim=config.dim_lm, out_dim=config.dim_enc)
@@ -585,5 +586,6 @@ class LangBridgeModel(PreTrainedModel):
         # TODO: don't know why batch_decode doesn't remove <|im_end|>, since it's in the special tokens
         completions = [s.replace('<|im_end|>', '') for s in completions]
         return completions
+
 
 

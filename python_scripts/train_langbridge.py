@@ -19,7 +19,7 @@ from transformers.utils import logging as hf_logging
 import sys
 sys.path.append('/data1/rzw/CODE/LangBridge/')
 from langbridge import LangBridgeModel, LangBridgeConfig
-from dataset import MathDataset, read_lego, Data
+from dataset import MathDataset, read_lego, read_MulIn_EngOut_alpaca, read_MulIn_MulOut_alpaca, Data
 
 torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
@@ -27,14 +27,14 @@ logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
 
 
-# import debugpy
-# try:
-#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-#     debugpy.listen(("localhost", 16233))
-#     print("Waiting for debugger attach")
-#     debugpy.wait_for_client()
-# except Exception as e:
-#     pass
+import debugpy
+try:
+    # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+    debugpy.listen(("localhost", 16233))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()
+except Exception as e:
+    pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
@@ -167,17 +167,18 @@ class AlignLBModule(LightningModule):
         actual_enc_length = enc_tokens['input_ids'].shape[1]
         max_length = self.total_max_length - actual_enc_length
 
-        if self.args.training_stage == 1:
+        if self.args.training_stage == 1 or self.args.training_stage == 2:
             output_tokens = self.lm_tokenizer(
                 outputs, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
             labels = output_tokens['input_ids'].clone().detach()
             labels[labels == self.lm_tokenizer.pad_token_id] = -100
-        else:
+        elif self.args.training_stage == 3:
             output_tokens = self.enc_tokenizer(
                 outputs, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
             labels = output_tokens['input_ids'].clone().detach()
             labels[labels == self.enc_tokenizer.pad_token_id] = -100
-
+        else:
+            raise ValueError(f"Invalid training stage: {self.args.training_stage}")
         return {
             'enc_ids': enc_tokens['input_ids'],
             'enc_mask': enc_tokens['attention_mask'],
@@ -203,11 +204,14 @@ class AlignLBModule(LightningModule):
         if self.args.training_stage == 1:
             train_set = read_lego(10000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
+        elif self.args.training_stage == 2:
+            train_set = read_MulIn_EngOut_alpaca()
+            train_dataset = MathDataset(train_set, self.args.training_stage)
+        elif self.args.training_stage == 3:
+            train_set = read_MulIn_MulOut_alpaca()
+            train_dataset = MathDataset(train_set, self.args.training_stage)
         else:
-            train_dataset = Data(
-                self.args.train_set_path, split='train')
-            raise NotImplementedError("not implemented")
-
+            raise ValueError(f"Invalid training stage: {self.args.training_stage}")
         if self.args.output_exists:  # labeled finetuning data
             def collate_fn(batch): return self.collate_fn_output_exists(
                 batch)
@@ -220,6 +224,7 @@ class AlignLBModule(LightningModule):
         return dataloader
 
     def val_dataloader(self):
+        raise NotImplementedError("not implemented val_dataloader")
         val_sets = self.args.val_set_path.split(',')
         dataloaders = []
         def collate_fn(batch): return self.collate_fn(batch, use_dynamic=False)
@@ -364,17 +369,18 @@ if __name__ == '__main__':
     )
 
     model_class = LangBridgeModel
-
-    if training_args.hf_checkpoint_path:
-        logger.info('loading from HF checkpoint...')
-
-        model = model_class.from_pretrained(
-            training_args.hf_checkpoint_path, config=config)
-    else:
-        if training_args.eval_only:
-            logger.warning('Evaluating an un-aligned model!')
-
+    if training_args.training_stage == 1:
         model = model_class(config, random_init=False)
+    elif training_args.training_stage == 2 or training_args.training_stage == 3:
+        if training_args.hf_checkpoint_path:
+            logger.info('loading from HF checkpoint...')
+
+            model = model_class.from_pretrained(
+                training_args.hf_checkpoint_path, config=config)
+        else:
+            raise ValueError("HF checkpoint path is required for training stage 2 and 3")
+    else:
+        raise ValueError(f"Invalid training stage: {training_args.training_stage}")
 
     # this is true for all our experiments, explained in section D.1
     # if training_args.add_new_lines_to_enc:
