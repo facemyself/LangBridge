@@ -27,14 +27,14 @@ logging.getLogger("lightning.pytorch").setLevel(logging.INFO)
 hf_logging.set_verbosity_error()
 
 
-import debugpy
-try:
-    # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-    debugpy.listen(("localhost", 16233))
-    print("Waiting for debugger attach")
-    debugpy.wait_for_client()
-except Exception as e:
-    pass
+# import debugpy
+# try:
+#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 16233))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 class AlignLBModule(LightningModule):
     def __init__(self, model, enc_tokenizer, lm_tokenizer, args):
@@ -202,10 +202,10 @@ class AlignLBModule(LightningModule):
 
     def train_dataloader(self):
         if self.args.training_stage == 1:
-            train_set = read_lego(10000)
+            train_set = read_lego(30000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         elif self.args.training_stage == 2:
-            train_set = read_MulIn_EngOut_alpaca()
+            train_set = read_MulIn_EngOut_alpaca(5000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         elif self.args.training_stage == 3:
             train_set = read_MulIn_MulOut_alpaca()
@@ -404,7 +404,7 @@ if __name__ == '__main__':
         from dotenv import load_dotenv
         load_dotenv()
         os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
-        os.environ["WANDB_MODE"] = "offline"
+        #os.environ["WANDB_MODE"] = "offline"
         wandb_logger = WandbLogger(
             project=f'Multilingual-{training_args.training_stage}',
             name=training_args.run_name)

@@ -101,12 +101,11 @@ def read_dataset(path):
 
 
 def read_lego(train_num=100000):
-    languages = ['Bengali', 'Thai', 'Swahili', 'Japanese', 'Chinese', 'German', 'French', 'Russian',
-                'Spanish']
+    languages = ['Bulgarian', 'German', 'Spanish', 'French', 'Portuguese', 'Russian', 'Chinese']
     dataset_train = []
     for train_name in languages:
         train_name_map = langs_map[train_name]
-        path_base = f'/data1/rzw/CODE/LangBridge/data/bilingual_pairs/en-{train_name_map}'
+        path_base = f'../data/bilingual_pairs/en-{train_name_map}'
         path_src = f'{path_base}/train_100k.{train_name_map}'
         path_trg = f'{path_base}/train_100k.en'
         sources = read_dataset(path_src)[:train_num]
@@ -122,7 +121,7 @@ def read_lego(train_num=100000):
     random.shuffle(dataset_train)
     return dataset_train
 
-def read_MulIn_EngOut_alpaca():
+def read_MulIn_EngOut_alpaca(train_num=100000):
     # languages = ['Bulgarian', 'Czech', 'German', 'English', 'Spanish', 'Finnish', 'French', 'Portuguese',
     #              'Russian', 'Chinese']
     languages = ['Bulgarian', 'German', 'English', 'Spanish', 'French', 'Portuguese',
@@ -130,11 +129,11 @@ def read_MulIn_EngOut_alpaca():
     dataset_train = []
     for train_name in languages:
         train_name_map = langs_map[train_name]
-        path_base = f'/data1/rzw/CODE/LangBridge/data/training-data'
+        path_base = f'../data/training-data'
         path_src = f'{path_base}/alpaca_data_cleaned.{train_name_map}.json'
         path_trg = f'{path_base}/alpaca_data_cleaned.en.json'
-        sources = read_dataset(path_src)
-        targets = read_dataset(path_trg)
+        sources = read_dataset(path_src)[:train_num]
+        targets = read_dataset(path_trg)[:train_num]
         train_set = [(source, target) for source, target in zip(sources, targets)]
         for source, target in train_set:
             dataset_train.append({
@@ -150,7 +149,7 @@ def read_MulIn_EngOut_alpaca():
 def read_MulIn_MulOut_alpaca():
     # languages = ['Bulgarian', 'Czech', 'German', 'English', 'Spanish', 'Finnish', 'French', 'Portuguese',
     #              'Russian', 'Chinese']
-    languages = ['Bulgarian', 'German', 'English', 'Spanish', 'French', 'Portuguese',
+    languages = ['German', 'English', 'Spanish', 'French', 'Portuguese',
                  'Russian', 'Chinese']
     dataset_train = []
     for train_name in languages:

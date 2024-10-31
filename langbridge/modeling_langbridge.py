@@ -80,6 +80,10 @@ class LBBaseModel(ABC, PreTrainedModel):
             
         self.enc_embeddings = self.enc.get_input_embeddings()
         self.dec_head = self.dec.lm_head
+
+        # 添加可训练的特殊token
+        #self.special_token = nn.Parameter(torch.randn(1, config.dim_enc))
+            
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = LinearNoEos(dim=config.dim_lm, out_dim=config.dim_enc)
@@ -127,9 +131,8 @@ class LBBaseModel(ABC, PreTrainedModel):
         
 
 
-        if self.training_stage == 1:
-            # 通过第一个Qwen模型
-            
+        if self.training_stage == 1 or self.training_stage == 2:
+            # 通过第一个Qwen模型      
             enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
             enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
             # 通过llama模型              
@@ -435,6 +438,8 @@ class LangBridgeModel(PreTrainedModel):
         'meta-math/MetaMath': LBLlama,
         'meta-llama/Llama-2-7b-hf': LBLlama,
         'mistralai/Mistral-7B-v0.1': LBMistral,
+        'mistralai/Mistral-7B-Instruct-v0.2': LBMistral,
+        'meta-llama/Meta-Llama-3-8B-Instruct': LBLlama,
     }
 
     def __init__(self, config: LangBridgeConfig, random_init=True, model_class=None):
