@@ -67,7 +67,7 @@ class AlignLBModule(LightningModule):
                  prog_bar=True, logger=True, sync_dist=self.sync_dist, add_dataloader_idx=False)
 
     def configure_optimizers(self):
-        alignment, enc, lm, dec = [], [], [], []
+        alignment, enc, lm, dec, special_token = [], [], [], [], []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if 'alignment' in name:
@@ -78,6 +78,8 @@ class AlignLBModule(LightningModule):
                     lm.append(param)
                 elif 'dec' in name:
                     dec.append(param)
+                elif 'special_token' in name:
+                    special_token.append(param)
                 else:
                     raise ValueError('unknown parameter')
         params = [
@@ -89,6 +91,8 @@ class AlignLBModule(LightningModule):
                 'weight_decay': self.args.w_decay_lm},
             {'params': dec, 'lr': self.args.learning_rate_enc,
                 'weight_decay': self.args.w_decay_enc},
+            {'params': special_token, 'lr': self.args.learning_rate_alignment,
+                'weight_decay': self.args.w_decay_alignment},
         ]
         if 'deepspeed' in self.args.strategy:
             optimizer = FusedAdam(params)

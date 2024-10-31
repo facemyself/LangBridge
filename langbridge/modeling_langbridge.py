@@ -9,7 +9,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel, XGLMForCausalLM, GPT2LMHeadModel, Qwen2ForCausalLM
 from transformers.modeling_outputs import (
@@ -66,6 +66,8 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_class = GPT2LMHeadModel
         elif 'qwen' in config.enc.lower():
             enc_class = Qwen2ForCausalLM
+        elif 'xglm' in config.enc.lower():
+            enc_class = XGLMForCausalLM
         else:
             enc_class = AutoModel
 
@@ -82,7 +84,7 @@ class LBBaseModel(ABC, PreTrainedModel):
         self.dec_head = self.dec.lm_head
 
         # 添加可训练的特殊token
-        #self.special_token = nn.Parameter(torch.randn(1, config.dim_enc))
+        self.special_token = nn.Parameter(torch.randn(config.dim_enc))
             
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
@@ -125,15 +127,18 @@ class LBBaseModel(ABC, PreTrainedModel):
         loss_reduction: str = 'mean',
         **kwargs
     ) -> CausalLMOutputWithPast:
-        batch_size, seq_length = enc_ids.shape[:2]
+        batch_size, _ = enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-
-        
-
-
+        eos = repeat(self.special_token, 'd -> b d', b=batch_size).to(device)
+        eos = rearrange(eos, 'b d -> b 1 d')
+        enc_embeddings = self.enc_embeddings(enc_ids)
+        enc_embeddings = torch.cat([enc_embeddings, eos], dim=1)
+        enc_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)  
+        seq_length = enc_embeddings.shape[1]
         if self.training_stage == 1 or self.training_stage == 2:
-            # 通过第一个Qwen模型      
-            enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
+            # 通过第一个Qwen模型
+                
+            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
             enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
             # 通过llama模型              
             if input_ids is not None:
@@ -212,8 +217,10 @@ class LBBaseModel(ABC, PreTrainedModel):
 
         else:
             if input_ids is not None:
-                enc_ids = torch.cat([enc_ids, input_ids], dim=1)
-                enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
+                input_ids_embeddings = self.enc_embeddings(input_ids)
+                enc_embeddings = torch.cat([enc_embeddings, input_ids_embeddings], dim=1)
+                enc_mask = torch.cat([enc_mask, attention_mask], dim=1) 
+            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
             # 通过第一个Qwen模型
             enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
             enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
@@ -274,26 +281,35 @@ class LBBaseModel(ABC, PreTrainedModel):
             # position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
             
             
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+            attention_mask = _prepare_4d_causal_attention_mask(
                     enc_mask,
                     (batch_size, lm_features.shape[1]),
                     lm_features,
                     past_key_values_length,
                 )
             # 从第i层开始继续前向传播
-            dec_hidden_state = lm_features
+            hidden_states = lm_features + self.embed_positions(position_ids, past_key_values_length)
+            hidden_states = nn.functional.dropout(hidden_states, p=float(self.dropout), training=self.training)
+            #dec_hidden_state = lm_features
             for i in range(self.dec_input_index, len(self.dec.model.layers)):
                 dec_hidden_states += (dec_hidden_state,)
+                if self.training:
+                    dropout_probability = torch.rand([])
+                    if dropout_probability < self.layerdrop:
+                        continue
                 layer_outputs = self.dec.model.layers[i](
                     dec_hidden_state,
                     attention_mask=attention_mask,
-                    position_ids=position_ids,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    layer_head_mask=None,
+                    cross_attn_layer_head_mask=None,
                     past_key_value=None,
                     output_attentions=False,
                     use_cache=False,
                 )
                 dec_hidden_state = layer_outputs[0]
-            dec_hidden_state = self.dec.model.norm(dec_hidden_state)
+            dec_hidden_state = self.dec.model.layer_norm(dec_hidden_state)
             dec_hidden_states += (dec_hidden_state,)
 
             assert len(dec_hidden_states) == len(self.dec.model.layers) + 1, "hidden states length mismatch"

@@ -154,7 +154,7 @@ def read_MulIn_MulOut_alpaca():
     dataset_train = []
     for train_name in languages:
         train_name_map = langs_map[train_name]
-        path_base = f'./datas/training-data/'
+        path_base = f'../data/training-data'
         path_src = f'{path_base}/alpaca_data_cleaned.{train_name_map}.json'
         #path_trg = f'{path_base}/alpaca_data_cleaned.en.json'
         train_set = read_dataset(path_src)
