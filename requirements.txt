@@ -1,5 +1,5 @@
 datasets
-deepspeed
+deepspeed==0.14.5
 einops
 einops-exts
 huggingface-hub
