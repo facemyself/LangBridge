@@ -139,3 +139,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+python_scripts/checkpoints
+python_scripts/lightning_logs
+python_scripts/Logs
