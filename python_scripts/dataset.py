@@ -146,7 +146,7 @@ def read_MulIn_EngOut_alpaca(train_num=100000):
     return dataset_train
 
 
-def read_MulIn_MulOut_alpaca():
+def read_MulIn_MulOut_alpaca(train_num=100000):
     # languages = ['Bulgarian', 'Czech', 'German', 'English', 'Spanish', 'Finnish', 'French', 'Portuguese',
     #              'Russian', 'Chinese']
     languages = ['German', 'English', 'Spanish', 'French', 'Portuguese',
@@ -154,10 +154,10 @@ def read_MulIn_MulOut_alpaca():
     dataset_train = []
     for train_name in languages:
         train_name_map = langs_map[train_name]
-        path_base = f'./datas/training-data/'
+        path_base = f'../data/training-data/'
         path_src = f'{path_base}/alpaca_data_cleaned.{train_name_map}.json'
         #path_trg = f'{path_base}/alpaca_data_cleaned.en.json'
-        train_set = read_dataset(path_src)
+        train_set = read_dataset(path_src)[:train_num]
         #targets = read_dataset(path_trg)
         #train_set = [(source, target) for source, target in zip(sources, targets)]
         for sample in train_set:

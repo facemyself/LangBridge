@@ -67,7 +67,7 @@ class AlignLBModule(LightningModule):
                  prog_bar=True, logger=True, sync_dist=self.sync_dist, add_dataloader_idx=False)
 
     def configure_optimizers(self):
-        alignment, enc, lm, dec = [], [], [], []
+        alignment, enc, lm, dec, special_token = [], [], [], [], []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if 'alignment' in name:
@@ -78,6 +78,8 @@ class AlignLBModule(LightningModule):
                     lm.append(param)
                 elif 'dec' in name:
                     dec.append(param)
+                elif 'special_token' in name:
+                    special_token.append(param)
                 else:
                     raise ValueError('unknown parameter')
         params = [
@@ -89,6 +91,8 @@ class AlignLBModule(LightningModule):
                 'weight_decay': self.args.w_decay_lm},
             {'params': dec, 'lr': self.args.learning_rate_enc,
                 'weight_decay': self.args.w_decay_enc},
+            {'params': special_token, 'lr': self.args.learning_rate_alignment,
+                'weight_decay': self.args.w_decay_alignment},
         ]
         if 'deepspeed' in self.args.strategy:
             optimizer = FusedAdam(params)
@@ -164,6 +168,9 @@ class AlignLBModule(LightningModule):
 
         enc_tokens = self.enc_tokenizer(
             inputs, padding=True, truncation=True, max_length=self.args.max_length_enc, return_tensors='pt')
+        enc_tokens = {k: v.long() if isinstance(v, torch.Tensor) else v 
+                      for k, v in enc_tokens.items()}
+        
         actual_enc_length = enc_tokens['input_ids'].shape[1]
         max_length = self.total_max_length - actual_enc_length
 
@@ -205,10 +212,10 @@ class AlignLBModule(LightningModule):
             train_set = read_lego(30000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         elif self.args.training_stage == 2:
-            train_set = read_MulIn_EngOut_alpaca(5000)
+            train_set = read_MulIn_EngOut_alpaca(30000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         elif self.args.training_stage == 3:
-            train_set = read_MulIn_MulOut_alpaca()
+            train_set = read_MulIn_MulOut_alpaca(30000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         else:
             raise ValueError(f"Invalid training stage: {self.args.training_stage}")

@@ -9,7 +9,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 from transformers import PreTrainedModel, AutoModel, AutoConfig, PreTrainedTokenizer, MT5EncoderModel, UMT5EncoderModel, XGLMForCausalLM, GPT2LMHeadModel, Qwen2ForCausalLM
 from transformers.modeling_outputs import (
@@ -20,7 +20,7 @@ from transformers.modeling_outputs import (
 from transformers.models.qwen2.modeling_qwen2 import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
 
 from .configuration_langbridge import LangBridgeConfig
-from .alignment_modules import LinearWithAddedEos, PerceiverResampler, FFNWithAddedEos, LinearNoEos
+from .alignment_modules import LinearWithAddedEos, PerceiverResampler, FFNWithAddedEos, LinearNoEos, FFN
 
 
 @contextlib.contextmanager
@@ -58,6 +58,7 @@ class LBBaseModel(ABC, PreTrainedModel):
         self.lm_output_index = config.lm_output_index
         #输入给第二个Qwen模型的第i层（从0开始计算）
         self.dec_input_index = config.dec_input_index
+        self.all_lm_layers = 32
         if 'umt5' in config.enc.lower():
             enc_class = UMT5EncoderModel
         elif 'mt5' in config.enc.lower():
@@ -66,6 +67,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_class = GPT2LMHeadModel
         elif 'qwen' in config.enc.lower():
             enc_class = Qwen2ForCausalLM
+            self.all_enc_layers = 28
         else:
             enc_class = AutoModel
 
@@ -82,14 +84,14 @@ class LBBaseModel(ABC, PreTrainedModel):
         self.dec_head = self.dec.lm_head
 
         # 添加可训练的特殊token
-        #self.special_token = nn.Parameter(torch.randn(1, config.dim_enc))
+        self.special_token = nn.Parameter(torch.randn(config.dim_enc))
             
         if config.alignments == 'linear':
             self.alignment_bottom = LinearNoEos(dim=config.dim_enc, out_dim=config.dim_lm)
             self.alignment_top = LinearNoEos(dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'ffn':
-            self.alignment_bottom = FFNWithAddedEos(dim=config.dim_enc, out_dim=config.dim_lm)
-            self.alignment_top = FFNWithAddedEos(dim=config.dim_lm, out_dim=config.dim_enc)
+            self.alignment_bottom = FFN(dim=config.dim_enc, out_dim=config.dim_lm)
+            self.alignment_top = FFN(dim=config.dim_lm, out_dim=config.dim_enc)
         elif config.alignments == 'latent':
             self.alignment_bottom = PerceiverResampler(dim=config.dim_enc, out_dim=config.dim_lm, num_latents=config.num_latents)
             self.alignment_top = PerceiverResampler(dim=config.dim_lm, out_dim=config.dim_enc, num_latents=config.num_latents)
@@ -125,16 +127,27 @@ class LBBaseModel(ABC, PreTrainedModel):
         loss_reduction: str = 'mean',
         **kwargs
     ) -> CausalLMOutputWithPast:
-        batch_size, seq_length = enc_ids.shape[:2]
+        batch_size, _ = enc_ids.shape[:2]
         device = input_ids.device if input_ids is not None else enc_ids.device
-
-        
-
-
+        if not isinstance(enc_ids, torch.LongTensor) and not isinstance(enc_ids, torch.cuda.LongTensor):
+            enc_ids = enc_ids.long()
+        if input_ids is not None and not isinstance(input_ids, torch.LongTensor) and not isinstance(input_ids, torch.cuda.LongTensor):
+            input_ids = input_ids.long()
+        eos = repeat(self.special_token, 'd -> b d', b=batch_size).to(device)
+        eos = rearrange(eos, 'b d -> b 1 d')
+        enc_embeddings = self.enc_embeddings(enc_ids)
+        enc_embeddings = torch.cat([enc_embeddings, eos], dim=1)
+        enc_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)
+        seq_length = enc_embeddings.shape[1]
         if self.training_stage == 1 or self.training_stage == 2:
             # 通过第一个Qwen模型      
-            enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
-            enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
+            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
+            # 添加norm层
+            if self.enc_output_index < self.all_enc_layers - 1:
+                norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
+            else:
+                norm_enc_outputs = enc_out.hidden_states[-1]
+            enc_features = self.alignment_bottom(norm_enc_outputs, enc_mask)
             # 通过llama模型              
             if input_ids is not None:
                 embeddings = self.embeddings(input_ids)
@@ -195,6 +208,8 @@ class LBBaseModel(ABC, PreTrainedModel):
                 shift_labels = full_labels[..., 1:].contiguous()
 
                 # 计算损失
+                shift_logits = shift_logits.float()  # 转换为float32
+                shift_labels = shift_labels.long()  # 确保labels是long类型
                 loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
                                     shift_labels.view(-1), reduction=loss_reduction)
                 
@@ -211,12 +226,19 @@ class LBBaseModel(ABC, PreTrainedModel):
             )
 
         else:
+            if self.training_stage != 3:
+                print("Evaluating the model...")
             if input_ids is not None:
-                enc_ids = torch.cat([enc_ids, input_ids], dim=1)
-                enc_mask = torch.cat([enc_mask, attention_mask], dim=1)
+                input_ids_embeddings = self.enc_embeddings(input_ids)
+                enc_embeddings = torch.cat([enc_embeddings, input_ids_embeddings], dim=1)
+                enc_mask = torch.cat([enc_mask, attention_mask], dim=1) 
             # 通过第一个Qwen模型
-            enc_out = self.enc(input_ids=enc_ids, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
-            enc_features = self.alignment_bottom(enc_out.hidden_states[self.enc_output_index + 1], enc_mask)
+            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
+            if self.enc_output_index < self.all_enc_layers - 1:
+                norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
+            else:
+                norm_enc_outputs = enc_out.hidden_states[-1]
+            enc_features = self.alignment_bottom(norm_enc_outputs, enc_mask)
 
             # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
             # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
@@ -258,9 +280,14 @@ class LBBaseModel(ABC, PreTrainedModel):
             lm_hidden_states += (lm_hidden_state,)
 
             assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
-            lm_features = self.alignment_top(lm_hidden_states[self.lm_output_index + 1], enc_mask)
+            if self.lm_output_index < self.all_lm_layers - 1:
+                norm_lm_outputs = self.lm.norm(lm_hidden_states[self.lm_output_index + 1])
+            else:
+                norm_lm_outputs = lm_hidden_states[-1]
+            lm_features = self.alignment_top(norm_lm_outputs, enc_mask)
 
-
+            assert lm_features.shape[0] == batch_size, f"Batch size mismatch: {lm_features.shape[0]} != {batch_size}"
+            assert lm_features.shape[2] == self.config.dim_enc, f"Hidden dimension mismatch: {lm_features.shape[2]} != {self.config.dim_enc}"
             # 通过第二个Qwen模型
             dec_hidden_states = ()
             for i in range(self.dec_input_index):
@@ -268,10 +295,11 @@ class LBBaseModel(ABC, PreTrainedModel):
 
             #dec_hidden_states[self.dec_input_index] = lm_features
             # past_key_values_length = 0
-            # position_ids = torch.arange(
-            #     past_key_values_length, lm_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
-            # )
-            # position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
+            # 重新计算position_ids
+            position_ids = torch.arange(
+                past_key_values_length, lm_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, lm_features.shape[1])
             
             
             attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
@@ -318,6 +346,8 @@ class LBBaseModel(ABC, PreTrainedModel):
                 shift_labels = full_labels[..., 1:].contiguous()
 
                 # 计算损失
+                shift_logits = shift_logits.float()  # 转换为float32
+                shift_labels = shift_labels.long()  # 确保labels是long类型
                 loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
                                     shift_labels.view(-1), reduction=loss_reduction)
                 

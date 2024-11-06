@@ -49,6 +49,35 @@ class LinearNoEos(nn.Module):
         x = self.linear(x)
         return x
 
+class FFN(nn.Module):
+    def __init__(self, dim, out_dim):
+        super().__init__()
+        self.ffn = FeedForward(dim, out_dim)
+
+    def forward(self, x, *args):
+        x = self.ffn(x)
+        return x
+
+
+def FeedForward(dim, out_dim, mult=2, act='relu'):
+    """
+    lucidrains implementation, slightly modified with the act parameter.
+    """
+
+    acts = dict(
+        gelu=nn.GELU,
+        relu=nn.ReLU
+    )
+
+    assert act in acts, f"act. can only be one of {acts.keys()}"
+
+    inner_dim = int(dim * mult)
+    return nn.Sequential(
+        nn.Linear(dim, out_dim),
+        acts[act](),
+        nn.Linear(out_dim, out_dim),
+    )
+
 
 class FFNWithAddedEos(nn.Module):
     def __init__(self, dim, out_dim):
