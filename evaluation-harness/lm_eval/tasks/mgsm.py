@@ -55,7 +55,7 @@ INVALID_ANS = "[invalid]"
 
 class MGSM(Task):
     VERSION = 0
-    DATASET_PATH = "juletxara/mgsm"
+    DATASET_PATH = "/workspace/LangBridge/data/mgsm"
     DATASET_NAME = None
     QUESTION = "Question:"
     ANSWER = "Step-by-Step Answer:"
@@ -73,6 +73,7 @@ class MGSM(Task):
             data_dir=data_dir,
             cache_dir=cache_dir,
             download_mode=download_mode,
+            trust_remote_code=True,
         )
         if self.DATASET_NAME == "en":
             return

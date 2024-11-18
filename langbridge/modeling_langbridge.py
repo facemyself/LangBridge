@@ -125,83 +125,76 @@ class LBBaseModel(ABC, PreTrainedModel):
         lm_past_key_values = None if past_key_values is None else past_key_values[0]
 
         if input_ids is not None:
-            embeddings = self.embeddings(input_ids)
+            llm_embeddings = self.embeddings(input_ids)
         bos_shifted = False
         if lm_past_key_values is None:
             assert enc_ids.size(0) == batch_size
 
             enc_features = self.get_encoder_features(
                 enc_ids, enc_mask)
-
-            if input_ids is not None:
-                first_input_ids = input_ids[:, 0]
-                if all(first_input_ids == self.lm.config.bos_token_id):
-                    # move bos embedding to the front
-                    bos_shifted = True
-                    embeddings = torch.cat(
-                        [embeddings[:, 0].unsqueeze(dim=1), enc_features, embeddings[:, 1:]], dim=1)
-                else:
-                    embeddings = torch.cat([enc_features, embeddings], dim=1)
-            else:
-                embeddings = enc_features
+            enc_mask = torch.cat(
+                        [enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)
             enc_feature_length = enc_features.shape[1]
         else:
             enc_feature_length = past_key_values[1]
 
-        if input_ids is not None:
-            if self.config.alignments not in ['linear', 'ffn']:
-                attn_mask = torch.cat(
-                    [torch.ones((batch_size, enc_feature_length), device=device, dtype=torch.long), attention_mask], dim=1)
-            else:
-                # use the encoder masks for the soft prompts
-                if bos_shifted:
-                    # TODO: messy code
-                    # torch.ones are there since the alignment adds a single learnable eos token at the enc
-                    attn_mask = torch.cat(
-                        [attention_mask[:, 0].unsqueeze(dim=1), enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask[:, 1:]], dim=1)
-                else:
-                    attn_mask = torch.cat(
-                        [enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long), attention_mask], dim=1)
-        else:
-            attn_mask = enc_mask
 
         # pass through LM
+        if input_ids is not None:
+            lm_out: BaseModelOutputWithPast = self.lm(
+                attention_mask=attention_mask,
+                inputs_embeds=llm_embeddings,
+                use_cache=use_cache,
+                past_key_values=lm_past_key_values,
+                return_dict=True,
+                **kwargs
+            )
         out: BaseModelOutputWithPast = self.lm(
-            attention_mask=attn_mask,
-            inputs_embeds=embeddings,
+            attention_mask=enc_mask,
+            inputs_embeds=enc_features,
             use_cache=use_cache,
             past_key_values=lm_past_key_values,
             return_dict=True,
             **kwargs
         )
-
         logits: torch.Tensor = self.lm_head(out.last_hidden_state)
 
         loss = None
         if labels is not None:
-            # no loss for soft prompts
-            no_loss_labels = torch.zeros(
-                (batch_size, enc_feature_length), device=device, dtype=torch.long) + -100
+            # # no loss for soft prompts
+            # no_loss_labels = torch.zeros(
+            #     (batch_size, enc_feature_length), device=device, dtype=torch.long) + -100
 
-            if bos_shifted:
-                full_labels = torch.cat(
-                    [labels[:, 0].unsqueeze(dim=1), no_loss_labels, labels[:, 1:]], dim=1)
-            else:
-                full_labels = torch.cat(
-                    [no_loss_labels, labels], dim=1)
-            # logits shape (batch, seq_length, #words)
-            shift_logits = logits[..., :-1, :].contiguous()
-            # labels shape (batch, seq_length)
-            shift_labels = full_labels[..., 1:].contiguous()
+            # if bos_shifted:
+            #     full_labels = torch.cat(
+            #         [labels[:, 0].unsqueeze(dim=1), no_loss_labels, labels[:, 1:]], dim=1)
+            # else:
+            #     full_labels = torch.cat(
+            #         [no_loss_labels, labels], dim=1)
+            # # logits shape (batch, seq_length, #words)
+            # shift_logits = logits[..., :-1, :].contiguous()
+            # # labels shape (batch, seq_length)
+            # shift_labels = full_labels[..., 1:].contiguous()
 
-            # Flatten the tokens
-            loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
-                                   shift_labels.view(-1), reduction=loss_reduction)
-            if loss_reduction == 'none':
-                # CrossEntropyLoss will flatten all dimensions by default
-                loss = rearrange(loss, '(b s) -> b s', b=batch_size)
-                # remove soft promtps from loss
-                loss = loss[:, enc_feature_length:]
+            # # Flatten the tokens
+            # loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
+            #                        shift_labels.view(-1), reduction=loss_reduction)
+            # if loss_reduction == 'none':
+            #     # CrossEntropyLoss will flatten all dimensions by default
+            #     loss = rearrange(loss, '(b s) -> b s', b=batch_size)
+            #     # remove soft promtps from loss
+            #     loss = loss[:, enc_feature_length:]
+
+            # 计算每一层hidden states的平均值并求loss
+            loss = 0
+            for i in range(len(lm_out.hidden_states)):
+                # 计算lm_out每层的平均hidden state
+                lm_mean_hidden = torch.mean(lm_out.hidden_states[i], dim=1, keepdim=True)
+                # 计算out每层的平均hidden state  
+                out_mean_hidden = torch.mean(out.hidden_states[i], dim=1, keepdim=True)
+                # 计算MSE loss
+                layer_loss = F.mse_loss(lm_mean_hidden, out_mean_hidden)
+                loss += layer_loss
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,

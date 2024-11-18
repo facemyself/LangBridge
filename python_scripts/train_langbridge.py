@@ -19,7 +19,7 @@ from transformers.utils import logging as hf_logging
 import sys
 sys.path.append('/workspace/LangBridge')
 from langbridge import LangBridgeModel, LangBridgeConfig
-from dataset import Data
+from dataset import Data, read_lego, read_MulIn_EngOut_alpaca, read_MulIn_MulOut_alpaca, MathDataset
 
 torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
@@ -89,6 +89,8 @@ class AlignLBModule(LightningModule):
             save_name = f'epoch={self.current_epoch}-step={self.global_step}'
             self.model.save_pretrained(
                 f'{self.args.output_dir}/{save_name}', safe_serialization=False)
+            self.enc_tokenizer.save_pretrained(
+                f'{self.args.output_dir}/encoder_tokenizer')
 
     def collate_fn(self, batch, use_dynamic=False):
         if use_dynamic:
@@ -171,10 +173,32 @@ class AlignLBModule(LightningModule):
 
         return enc_length, max_length
 
-    def train_dataloader(self):
-        train_dataset = Data(
-            self.args.train_set_path, split='train')
+    # def train_dataloader(self):
+    #     train_dataset = Data(
+    #         self.args.train_set_path, split='train')
 
+    #     if self.args.output_exists:  # labeled finetuning data
+    #         def collate_fn(batch): return self.collate_fn_output_exists(
+    #             batch)
+    #     else:  # unlabeled pretraining data
+    #         def collate_fn(batch): return self.collate_fn(
+    #             batch, use_dynamic=self.args.use_dynamic_enc_length)
+    #     dataloader = DataLoader(train_dataset, batch_size=self.args.per_device_train_batch_size,
+    #                             shuffle=True, num_workers=self.args.dataloader_num_workers, collate_fn=collate_fn)
+
+    #     return dataloader
+    def train_dataloader(self):
+        if self.args.training_stage == 1:
+            train_set = read_lego(100000)
+            train_dataset = MathDataset(train_set, self.args.training_stage)
+        elif self.args.training_stage == 2:
+            train_set = read_MulIn_EngOut_alpaca(30000)
+            train_dataset = MathDataset(train_set, self.args.training_stage)
+        elif self.args.training_stage == 3:
+            train_set = read_MulIn_MulOut_alpaca(30000)
+            train_dataset = MathDataset(train_set, self.args.training_stage)
+        else:
+            raise ValueError(f"Invalid training stage: {self.args.training_stage}")
         if self.args.output_exists:  # labeled finetuning data
             def collate_fn(batch): return self.collate_fn_output_exists(
                 batch)
@@ -255,7 +279,7 @@ class LBTrainingArguments:
     gradient_accumulation_steps: int = field(default=1)
     gradient_clip_val: float = field(default=1.0)
     bf16: bool = field(default=True)
-
+    training_stage: int = field(default=1)
 
 if __name__ == '__main__':
     parser = HfArgumentParser(LBTrainingArguments)

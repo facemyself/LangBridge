@@ -1,11 +1,13 @@
 #!/bin/env bash
 #export OMP_NUM_THREADS=8
-export HUGGINGFACE_HUB_CACHE=/data1/rzw/CACHE/huggingface/hub
+export HUGGINGFACE_HUB_CACHE=/workspace/CACHE
 
 
-export CUDA_VISIBLE_DEVICES=7
-NUM_GPU=1
-
+export CUDA_VISIBLE_DEVICES=0,1
+NUM_GPU=2
+BATCH_SIZE_PER_GPU=4
+TOTAL_BATCH_SIZE=128
+GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPU/$BATCH_SIZE_PER_GPU))
 ARGS="
 --n_gpu $NUM_GPU
 --strategy deepspeed_stage_2
@@ -23,14 +25,14 @@ ARGS="
 --max_length_enc 1024
 --freeze_language_model True
 --freeze_encoder True
---learning_rate_alignment 6e-4
+--learning_rate_alignment 4e-5
 --learning_rate_enc 2e-5
 --w_decay_alignment 0.0
 --w_decay_enc 0.1
 --warmup_steps 0
---per_device_train_batch_size 4
---per_device_eval_batch_size 16
---gradient_accumulation_steps 8
+--per_device_train_batch_size $BATCH_SIZE_PER_GPU
+--per_device_eval_batch_size $BATCH_SIZE_PER_GPU
+--gradient_accumulation_steps $GRADIENT_ACC_STEPS
 --logging_steps 10
 --num_train_epochs 1
 --dataloader_num_workers 16
