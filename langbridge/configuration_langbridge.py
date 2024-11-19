@@ -17,7 +17,7 @@ class LangBridgeConfig(PretrainedConfig):
         lm_input_index: int = -1,
         lm_output_index: int = -1,
         dec_input_index: int = -1,
-        training_stage: int = 1,
+        training_stage: int = 3,
         **kwargs
     ):
         super().__init__(**kwargs)

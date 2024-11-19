@@ -50,8 +50,8 @@ GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPUS/$BATCH_SIZE_PER_GPU))
 ARGS="
 --n_gpu $NUM_GPUS
 --strategy deepspeed_stage_2
---output_dir checkpoints/metamath-qwen2.5-stage1-6-6-25-21
---run_name metamath-qwen2.5-stage1-6-6-25-21
+--output_dir checkpoints/metamath-qwen2.5-stage1
+--run_name metamath-qwen2.5-stage1
 --seed 42
 --train_set_path /data1/rzw/CODE/LangBridge/data/metamath-200k
 --output_exists True
@@ -77,10 +77,10 @@ ARGS="
 --dataloader_num_workers 16
 --bf16 True
 --use_wandb False
---enc_output_index 6
---lm_input_index 6
---lm_output_index 25
---dec_input_index 21
+--enc_output_index 27
+--lm_input_index 0
+--lm_output_index 31
+--dec_input_index 0
 --training_stage 1
 "
 
@@ -104,13 +104,13 @@ GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPUS/$BATCH_SIZE_PER_GPU))
 ARGS="
 --n_gpu $NUM_GPUS
 --strategy deepspeed_stage_2
---output_dir checkpoints/metamath-qwen2.5-stage2-6-6-25-21
---run_name metamath-qwen2.5-stage2-6-6-25-21
+--output_dir checkpoints/metamath-qwen2.5-stage2
+--run_name metamath-qwen2.5-stage2
 --seed 42
 --output_exists True
 --enc_name_or_path Qwen/Qwen2.5-1.5B-Instruct
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
---hf_checkpoint_path checkpoints/metamath-qwen2.5-stage1-6-6-25-21/epoch=1
+--hf_checkpoint_path checkpoints/metamath-qwen2.5-stage1/epoch=1
 --alignments ffn
 --enc_hidden_size 1536
 --lm_hidden_size 4096
@@ -130,11 +130,11 @@ ARGS="
 --num_train_epochs 1
 --dataloader_num_workers 16
 --bf16 True
---use_wandb True
---enc_output_index 6
---lm_input_index 6
---lm_output_index 25
---dec_input_index 21
+--use_wandb False
+--enc_output_index 27
+--lm_input_index 0
+--lm_output_index 31
+--dec_input_index 0
 --training_stage 2
 "
 
@@ -158,13 +158,13 @@ GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPUS/$BATCH_SIZE_PER_GPU))
 ARGS="
 --n_gpu $NUM_GPUS
 --strategy deepspeed_stage_2
---output_dir checkpoints/metamath-qwen2.5-stage3-6-6-25-21
---run_name metamath-qwen2.5-stage3-6-6-25-21
+--output_dir checkpoints/metamath-qwen2.5-stage3
+--run_name metamath-qwen2.5-stage3
 --seed 42
 --output_exists True
 --enc_name_or_path Qwen/Qwen2.5-1.5B-Instruct
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
---hf_checkpoint_path checkpoints/metamath-qwen2.5-stage2-6-6-25-21/epoch=1
+--hf_checkpoint_path checkpoints/metamath-qwen2.5-stage2/epoch=1
 --alignments ffn
 --enc_hidden_size 1536
 --lm_hidden_size 4096
@@ -185,10 +185,10 @@ ARGS="
 --dataloader_num_workers 16
 --bf16 True
 --use_wandb True
---enc_output_index 6
---lm_input_index 6
---lm_output_index 25
---dec_input_index 21
+--enc_output_index 27
+--lm_input_index 0
+--lm_output_index 31
+--dec_input_index 0
 --training_stage 3
 "
 

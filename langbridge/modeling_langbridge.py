@@ -140,7 +140,11 @@ class LBBaseModel(ABC, PreTrainedModel):
         enc_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)
         seq_length = enc_embeddings.shape[1]
         if self.training_stage == 1 or self.training_stage == 2:
-            # 通过第一个Qwen模型      
+            # 通过第一个Qwen模型
+            if input_ids is not None:
+                input_ids_embeddings = self.enc_embeddings(input_ids)
+                enc_embeddings = torch.cat([enc_embeddings, input_ids_embeddings], dim=1)
+                enc_mask = torch.cat([enc_mask, attention_mask], dim=1)       
             enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
             # 添加norm层
             if self.enc_output_index < self.all_enc_layers - 1:
@@ -148,31 +152,31 @@ class LBBaseModel(ABC, PreTrainedModel):
             else:
                 norm_enc_outputs = enc_out.hidden_states[-1]
             enc_features = self.alignment_bottom(norm_enc_outputs, enc_mask)
-            # 通过llama模型              
-            if input_ids is not None:
-                embeddings = self.embeddings(input_ids)
-                embeddings = torch.cat([enc_features, embeddings], dim=1)
-                attn_mask = torch.cat(
-                        [enc_mask, attention_mask], dim=1)
-            else:
-                embeddings = enc_features
-                attn_mask = enc_mask
+            # # 通过llama模型              
+            # if input_ids is not None:
+            #     embeddings = self.embeddings(input_ids)
+            #     embeddings = torch.cat([enc_features, embeddings], dim=1)
+            #     attn_mask = torch.cat(
+            #             [enc_mask, attention_mask], dim=1)
+            # else:
+            #     embeddings = enc_features
+            #     attn_mask = enc_mask
             past_key_values_length = 0
             position_ids = torch.arange(
-                past_key_values_length, embeddings.shape[1] + past_key_values_length, dtype=torch.long, device=device
+                past_key_values_length, enc_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
             )
-            position_ids = position_ids.unsqueeze(0).view(-1, embeddings.shape[1])
+            position_ids = position_ids.unsqueeze(0).view(-1, enc_features.shape[1])
 
             attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                    attn_mask,
-                    (batch_size, embeddings.shape[1]),
-                    embeddings,
+                    enc_mask,
+                    (batch_size, enc_features.shape[1]),
+                    enc_features,
                     past_key_values_length,
                 )
             lm_hidden_states = ()
             for i in range(self.lm_input_index):
-                lm_hidden_states += (torch.zeros_like(embeddings),)
-            lm_hidden_state = embeddings
+                lm_hidden_states += (torch.zeros_like(enc_features),)
+            lm_hidden_state = enc_features
             # 从第i层开始继续前向传播
             for i in range(self.lm_input_index, len(self.lm.layers)):
                 lm_hidden_states += (lm_hidden_state,)

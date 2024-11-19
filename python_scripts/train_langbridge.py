@@ -411,7 +411,7 @@ if __name__ == '__main__':
         from dotenv import load_dotenv
         load_dotenv()
         os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
-        #os.environ["WANDB_MODE"] = "offline"
+        os.environ["WANDB_MODE"] = "offline"
         wandb_logger = WandbLogger(
             project=f'Multilingual-{training_args.training_stage}',
             name=training_args.run_name)
