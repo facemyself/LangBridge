@@ -208,17 +208,17 @@ class AlignLBModule(LightningModule):
         return enc_length, max_length
 
     def train_dataloader(self):
-        if self.args.training_stage == 1:
-            train_set = read_lego(30000)
-            train_dataset = MathDataset(train_set, self.args.training_stage)
-        elif self.args.training_stage == 2:
-            train_set = read_MulIn_EngOut_alpaca(30000)
-            train_dataset = MathDataset(train_set, self.args.training_stage)
-        elif self.args.training_stage == 3:
-            train_set = read_MulIn_MulOut_alpaca(30000)
-            train_dataset = MathDataset(train_set, self.args.training_stage)
-        else:
-            raise ValueError(f"Invalid training stage: {self.args.training_stage}")
+        # if self.args.training_stage == 1:
+        #     train_set = read_lego(30000)
+        #     train_dataset = MathDataset(train_set, self.args.training_stage)
+        # elif self.args.training_stage == 2:
+        #     train_set = read_MulIn_EngOut_alpaca(30000)
+        #     train_dataset = MathDataset(train_set, self.args.training_stage)
+        # elif self.args.training_stage == 3:
+        train_set = read_MulIn_MulOut_alpaca(30000)
+        train_dataset = MathDataset(train_set, self.args.training_stage)
+        # else:
+        #     raise ValueError(f"Invalid training stage: {self.args.training_stage}")
         if self.args.output_exists:  # labeled finetuning data
             def collate_fn(batch): return self.collate_fn_output_exists(
                 batch)
