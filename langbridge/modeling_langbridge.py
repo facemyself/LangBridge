@@ -41,8 +41,7 @@ class LBBaseModel(ABC, PreTrainedModel):
     enc: PreTrainedModel
     lm: PreTrainedModel
     lm_head: nn.Linear
-    dec: PreTrainedModel
-    dec_head: nn.Linear
+    enc_head: nn.Linear
     enc_embeddings: nn.Embedding
 
     config_class = LangBridgeConfig
@@ -74,14 +73,14 @@ class LBBaseModel(ABC, PreTrainedModel):
         if random_init:
             enc_config = AutoConfig.from_pretrained(config.enc)
             self.enc = enc_class(config=enc_config)
-            self.dec = enc_class(config=enc_config)
+            #self.dec = enc_class(config=enc_config)
         else:
             print('loading encoder from pretrained')
             self.enc = enc_class.from_pretrained(config.enc)
-            self.dec = enc_class.from_pretrained(config.enc)
+            #self.dec = enc_class.from_pretrained(config.enc)
             
         self.enc_embeddings = self.enc.get_input_embeddings()
-        self.dec_head = self.dec.lm_head
+        self.enc_head = self.enc.lm_head
 
         # 添加可训练的特殊token
         self.special_token = nn.Parameter(torch.randn(config.dim_enc))
@@ -104,10 +103,10 @@ class LBBaseModel(ABC, PreTrainedModel):
         for param in self.enc.parameters():
             param.requires_grad = False
 
-    def freeze_decoder(self):
-        """freeze vision model """
-        for param in self.dec.parameters():
-            param.requires_grad = False
+    # def freeze_decoder(self):
+    #     """freeze vision model """
+    #     for param in self.dec.parameters():
+    #         param.requires_grad = False
 
     def freeze_lm(self):
         for param in self.lm.parameters():
@@ -133,11 +132,11 @@ class LBBaseModel(ABC, PreTrainedModel):
             enc_ids = enc_ids.long()
         if input_ids is not None and not isinstance(input_ids, torch.LongTensor) and not isinstance(input_ids, torch.cuda.LongTensor):
             input_ids = input_ids.long()
-        eos = repeat(self.special_token, 'd -> b d', b=batch_size).to(device)
-        eos = rearrange(eos, 'b d -> b 1 d')
+        # eos = repeat(self.special_token, 'd -> b d', b=batch_size).to(device)
+        # eos = rearrange(eos, 'b d -> b 1 d')
         enc_embeddings = self.enc_embeddings(enc_ids)
-        enc_embeddings = torch.cat([enc_embeddings, eos], dim=1)
-        enc_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)
+        #enc_embeddings = torch.cat([enc_embeddings, eos], dim=1)
+        #enc_mask = torch.cat([enc_mask, torch.ones((batch_size, 1), device=device, dtype=torch.long)], dim=1)
         seq_length = enc_embeddings.shape[1]
         if self.training_stage == 1 or self.training_stage == 2:
             # 通过第一个Qwen模型
@@ -145,22 +144,51 @@ class LBBaseModel(ABC, PreTrainedModel):
                 input_ids_embeddings = self.enc_embeddings(input_ids)
                 enc_embeddings = torch.cat([enc_embeddings, input_ids_embeddings], dim=1)
                 enc_mask = torch.cat([enc_mask, attention_mask], dim=1)       
-            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
-            # 添加norm层
-            if self.enc_output_index < self.all_enc_layers - 1:
-                norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
-            else:
-                norm_enc_outputs = enc_out.hidden_states[-1]
-            enc_features = self.alignment_bottom(norm_enc_outputs, enc_mask)
-            # # 通过llama模型              
-            # if input_ids is not None:
-            #     embeddings = self.embeddings(input_ids)
-            #     embeddings = torch.cat([enc_features, embeddings], dim=1)
-            #     attn_mask = torch.cat(
-            #             [enc_mask, attention_mask], dim=1)
+            past_key_values_length = 0
+            # 重新计算position_ids
+            position_ids = torch.arange(
+                past_key_values_length, enc_embeddings.shape[1] + past_key_values_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, enc_embeddings.shape[1])
+            
+            
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    enc_mask,
+                    (batch_size, enc_embeddings.shape[1]),
+                    enc_embeddings,
+                    past_key_values_length,
+                )
+            # 从第i层开始继续前向传播
+            enc_hidden_states = ()
+            enc_hidden_state = enc_embeddings
+            for i in range(0, 14):
+                enc_hidden_states += (enc_hidden_state,)
+                layer_outputs = self.enc.model.layers[i](
+                    enc_hidden_state,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                enc_hidden_state = layer_outputs[0]
+            #dec_hidden_state = self.dec.model.norm(dec_hidden_state)
+            enc_hidden_states += (enc_hidden_state,)
+
+            # if self.enc_output_index < self.all_enc_layers - 1:
+            #     norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
             # else:
-            #     embeddings = enc_features
-            #     attn_mask = enc_mask
+            #     norm_enc_outputs = enc_out.hidden_states[-1]
+            enc_features = self.alignment_bottom(enc_hidden_states[-1], enc_mask)
+
+            # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
+            # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
+
+
+            # # 通过MetaMath模型
+            # lm_hidden_states = [torch.zeros_like(enc_features) for _ in range(self.lm_input_index + 1)]
+            # lm_hidden_states[self.lm_input_index] = enc_features
+            
             past_key_values_length = 0
             position_ids = torch.arange(
                 past_key_values_length, enc_features.shape[1] + past_key_values_length, dtype=torch.long, device=device
@@ -174,11 +202,11 @@ class LBBaseModel(ABC, PreTrainedModel):
                     past_key_values_length,
                 )
             lm_hidden_states = ()
-            for i in range(self.lm_input_index):
-                lm_hidden_states += (torch.zeros_like(enc_features),)
+            # for i in range(self.lm_input_index):
+            #     lm_hidden_states += (torch.zeros_like(enc_features),)
             lm_hidden_state = enc_features
             # 从第i层开始继续前向传播
-            for i in range(self.lm_input_index, len(self.lm.layers)):
+            for i in range(0, len(self.lm.layers)):
                 lm_hidden_states += (lm_hidden_state,)
                 layer_outputs = self.lm.layers[i](
                     lm_hidden_state,
@@ -193,6 +221,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             lm_hidden_states += (lm_hidden_state,)
 
             assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
+            #assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
             # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
             logits = self.lm_head(lm_hidden_states[-1])
 
@@ -237,12 +266,42 @@ class LBBaseModel(ABC, PreTrainedModel):
                 enc_embeddings = torch.cat([enc_embeddings, input_ids_embeddings], dim=1)
                 enc_mask = torch.cat([enc_mask, attention_mask], dim=1) 
             # 通过第一个Qwen模型
-            enc_out = self.enc(inputs_embeds=enc_embeddings, attention_mask=enc_mask, output_hidden_states=True, use_cache=False)
-            if self.enc_output_index < self.all_enc_layers - 1:
-                norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
-            else:
-                norm_enc_outputs = enc_out.hidden_states[-1]
-            enc_features = self.alignment_bottom(norm_enc_outputs, enc_mask)
+            past_key_values_length = 0
+            # 重新计算position_ids
+            position_ids = torch.arange(
+                past_key_values_length, enc_embeddings.shape[1] + past_key_values_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, enc_embeddings.shape[1])
+            
+            
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    enc_mask,
+                    (batch_size, enc_embeddings.shape[1]),
+                    enc_embeddings,
+                    past_key_values_length,
+                )
+            # 从第i层开始继续前向传播
+            enc_hidden_states = ()
+            enc_hidden_state = enc_embeddings
+            for i in range(0, 14):
+                enc_hidden_states += (enc_hidden_state,)
+                layer_outputs = self.enc.model.layers[i](
+                    enc_hidden_state,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                enc_hidden_state = layer_outputs[0]
+            #dec_hidden_state = self.dec.model.norm(dec_hidden_state)
+            enc_hidden_states += (enc_hidden_state,)
+
+            # if self.enc_output_index < self.all_enc_layers - 1:
+            #     norm_enc_outputs = self.enc.model.norm(enc_out.hidden_states[self.enc_output_index + 1])
+            # else:
+            #     norm_enc_outputs = enc_out.hidden_states[-1]
+            enc_features = self.alignment_bottom(enc_hidden_states[-1], enc_mask)
 
             # lm_out = self.lm(attention_mask=enc_mask, inputs_embeds=enc_features, output_hidden_states=True, use_cache=False)
             # lm_features = self.alignment_top(lm_out.hidden_states[-1], enc_mask)
@@ -265,11 +324,11 @@ class LBBaseModel(ABC, PreTrainedModel):
                     past_key_values_length,
                 )
             lm_hidden_states = ()
-            for i in range(self.lm_input_index):
-                lm_hidden_states += (torch.zeros_like(enc_features),)
+            # for i in range(self.lm_input_index):
+            #     lm_hidden_states += (torch.zeros_like(enc_features),)
             lm_hidden_state = enc_features
             # 从第i层开始继续前向传播
-            for i in range(self.lm_input_index, len(self.lm.layers)):
+            for i in range(0, len(self.lm.layers)):
                 lm_hidden_states += (lm_hidden_state,)
                 layer_outputs = self.lm.layers[i](
                     lm_hidden_state,
@@ -280,22 +339,22 @@ class LBBaseModel(ABC, PreTrainedModel):
                     use_cache=False,
                 )
                 lm_hidden_state = layer_outputs[0]
-            lm_hidden_state = self.lm.norm(lm_hidden_state)
+            #lm_hidden_state = self.lm.norm(lm_hidden_state)
             lm_hidden_states += (lm_hidden_state,)
 
             assert len(lm_hidden_states) == len(self.lm.layers) + 1, "hidden states length mismatch"
-            if self.lm_output_index < self.all_lm_layers - 1:
-                norm_lm_outputs = self.lm.norm(lm_hidden_states[self.lm_output_index + 1])
-            else:
-                norm_lm_outputs = lm_hidden_states[-1]
-            lm_features = self.alignment_top(norm_lm_outputs, enc_mask)
+            # if self.lm_output_index < self.all_lm_layers - 1:
+            #     norm_lm_outputs = self.lm.norm(lm_hidden_states[self.lm_output_index + 1])
+            # else:
+            #     norm_lm_outputs = lm_hidden_states[-1]
+            lm_features = self.alignment_top(lm_hidden_states[-1], enc_mask)
 
             assert lm_features.shape[0] == batch_size, f"Batch size mismatch: {lm_features.shape[0]} != {batch_size}"
             assert lm_features.shape[2] == self.config.dim_enc, f"Hidden dimension mismatch: {lm_features.shape[2]} != {self.config.dim_enc}"
             # 通过第二个Qwen模型
-            dec_hidden_states = ()
-            for i in range(self.dec_input_index):
-                dec_hidden_states += (torch.zeros_like(lm_features),)
+            # dec_hidden_states = ()
+            # for i in range(self.dec_input_index):
+            #     dec_hidden_states += (torch.zeros_like(lm_features),)
 
             #dec_hidden_states[self.dec_input_index] = lm_features
             # past_key_values_length = 0
@@ -313,26 +372,26 @@ class LBBaseModel(ABC, PreTrainedModel):
                     past_key_values_length,
                 )
             # 从第i层开始继续前向传播
-            dec_hidden_state = lm_features
-            for i in range(self.dec_input_index, len(self.dec.model.layers)):
-                dec_hidden_states += (dec_hidden_state,)
-                layer_outputs = self.dec.model.layers[i](
-                    dec_hidden_state,
+            enc_hidden_state = lm_features
+            for i in range(14, len(self.enc.model.layers)):
+                enc_hidden_states += (enc_hidden_state,)
+                layer_outputs = self.enc.model.layers[i](
+                    enc_hidden_state,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=None,
                     output_attentions=False,
                     use_cache=False,
                 )
-                dec_hidden_state = layer_outputs[0]
-            dec_hidden_state = self.dec.model.norm(dec_hidden_state)
-            dec_hidden_states += (dec_hidden_state,)
+                enc_hidden_state = layer_outputs[0]
+            enc_hidden_state = self.enc.model.norm(enc_hidden_state)
+            enc_hidden_states += (enc_hidden_state,)
 
-            assert len(dec_hidden_states) == len(self.dec.model.layers) + 1, "hidden states length mismatch"
+            assert len(enc_hidden_states) == len(self.enc.model.layers) + 2, "hidden states length mismatch"
 
 
             # dec_out = self.dec(attention_mask=attn_mask, inputs_embeds=lm_features, output_hidden_states=True)
-            logits = self.dec_head(dec_hidden_states[-1])
+            logits = self.enc_head(enc_hidden_states[-1])
 
             # 计算损失
             loss = None
@@ -364,7 +423,7 @@ class LBBaseModel(ABC, PreTrainedModel):
             return CausalLMOutputWithPast(
                 loss=loss,
                 logits=logits,
-                hidden_states=dec_hidden_states,
+                hidden_states=enc_hidden_states,
             )
 
 
@@ -488,8 +547,8 @@ class LangBridgeModel(PreTrainedModel):
 
         if config.freeze_encoder:
             self.freeze_encoder()
-        if config.freeze_decoder:
-            self.freeze_decoder()
+        # if config.freeze_decoder:
+        #     self.freeze_decoder()
 
     @classmethod
     def _find_lm_class(cls, language_model_id: str):
@@ -501,8 +560,8 @@ class LangBridgeModel(PreTrainedModel):
     def freeze_encoder(self):
         self.lb.freeze_encoder()
 
-    def freeze_decoder(self):
-        self.lb.freeze_decoder()
+    # def freeze_decoder(self):
+    #     self.lb.freeze_decoder()
 
 
     def freeze_lm(self):

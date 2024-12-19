@@ -21,12 +21,12 @@ def construct_prompt_mt(query, src_lang_name, trg_lang_name):
     )
     return prompt_no_input
 
-def construct_prompt_ins(query, trg_lang_name):
+def construct_prompt_ins(query):
     # return query
     prompt_no_input = (
         "Below is an instruction that describes a task. "
         "Write a response that appropriately completes the request.\n\n"
-        f"### Instruction:\n{query}\n({trg_lang_name})\n### Response:"
+        f"### Instruction:\n{query}\n### Response:"
     )
     return prompt_no_input
 
@@ -70,8 +70,7 @@ class MathDataset(Dataset):
                 'output': sample['target']
             }
         elif self.training_stage == 2 or self.training_stage == 3:
-            sample['prompt'] = construct_prompt_ins(sample['source'],
-                                                   sample['target_language'])
+            sample['prompt'] = construct_prompt_ins(sample['source'])
             return {
                 'input': sample['prompt'],
                 'output': sample['target']
@@ -149,7 +148,7 @@ def read_MulIn_EngOut_alpaca(train_num=100000):
 def read_MulIn_MulOut_alpaca(train_num=100000):
     # languages = ['Bulgarian', 'Czech', 'German', 'English', 'Spanish', 'Finnish', 'French', 'Portuguese',
     #              'Russian', 'Chinese']
-    languages = ['German', 'English', 'Spanish', 'French', 'Portuguese',
+    languages = ['Bulgarian', 'German', 'English', 'Spanish', 'French', 'Portuguese',
                  'Russian', 'Chinese']
     dataset_train = []
     for train_name in languages:
@@ -170,3 +169,19 @@ def read_MulIn_MulOut_alpaca(train_num=100000):
     random.shuffle(dataset_train)
     return dataset_train
 
+def read_aya(train_num=100000):
+    # languages = ['Bulgarian', 'Czech', 'German', 'English', 'Spanish', 'Finnish', 'French', 'Portuguese',
+    #              'Russian', 'Chinese']
+    dataset_train = []
+    train_set = load_dataset("/data1/rzw/CODE/LangBridge/data/aya_dataset")['train']
+    #targets = read_dataset(path_trg)
+    #train_set = [(source, target) for source, target in zip(sources, targets)]
+    for sample in train_set:
+        dataset_train.append({
+            'source': sample["inputs"],
+            'target': sample["targets"],
+            'source_language': sample["language"],
+            'target_language': 'English',
+        })
+    random.shuffle(dataset_train)
+    return dataset_train

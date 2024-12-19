@@ -2,19 +2,19 @@ from transformers import AutoTokenizer
 from langbridge import LangBridgeModel
 
 # our pretrained langbridge models all leverage this encoder tokenizer
-import debugpy
-try:
-    # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-    debugpy.listen(("localhost", 16233))
-    print("Waiting for debugger attach")
-    debugpy.wait_for_client()
-except Exception as e:
-    pass
+# import debugpy
+# try:
+#     # 5678 is   the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 16233))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 
 enc_tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-1.5B-Instruct') 
 lm_tokenizer = AutoTokenizer.from_pretrained('meta-math/MetaMath-7B-V1.0')
-model = LangBridgeModel.from_pretrained('/workspace/LangBridge/python_scripts/checkpoints/metamath-qwen2.5-stage2/epoch=1').half().to('cuda')
+model = LangBridgeModel.from_pretrained('/data1/rzw/CODE/LangBridge/python_scripts/checkpoints/metamath-qwen2.5-stage3/epoch=3').half().to('cuda')
 
 enc_tokenizer.bos_token = enc_tokenizer.pad_token
 enc_tokenizer.bos_token_id = enc_tokenizer.pad_token_id

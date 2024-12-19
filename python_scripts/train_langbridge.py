@@ -19,7 +19,7 @@ from transformers.utils import logging as hf_logging
 import sys
 sys.path.append('/data1/rzw/CODE/LangBridge/')
 from langbridge import LangBridgeModel, LangBridgeConfig
-from dataset import MathDataset, read_lego, read_MulIn_EngOut_alpaca, read_MulIn_MulOut_alpaca, Data
+from dataset import MathDataset, read_lego, read_MulIn_EngOut_alpaca, read_MulIn_MulOut_alpaca, Data, read_aya
 
 torch.set_float32_matmul_precision('medium')
 logger = logging.getLogger(__name__)
@@ -168,6 +168,16 @@ class AlignLBModule(LightningModule):
 
         enc_tokens = self.enc_tokenizer(
             inputs, padding=True, truncation=True, max_length=self.args.max_length_enc, return_tensors='pt')
+        # 添加 eos_token_id 到每个序列
+        eos_token_id = self.enc_tokenizer.eos_token_id
+        enc_tokens['input_ids'] = torch.cat(
+            [enc_tokens['input_ids'], torch.full((enc_tokens['input_ids'].size(0), 1), eos_token_id, dtype=torch.long)], dim=-1
+        )
+
+        # 处理 attention_mask，扩展以匹配新增的 eos_token
+        enc_tokens['attention_mask'] = torch.cat(
+            [enc_tokens['attention_mask'], torch.ones((enc_tokens['attention_mask'].size(0), 1), dtype=torch.long)], dim=-1
+        )
         enc_tokens = {k: v.long() if isinstance(v, torch.Tensor) else v 
                       for k, v in enc_tokens.items()}
         
@@ -215,7 +225,7 @@ class AlignLBModule(LightningModule):
             train_set = read_MulIn_EngOut_alpaca(30000)
             train_dataset = MathDataset(train_set, self.args.training_stage)
         elif self.args.training_stage == 3:
-            train_set = read_MulIn_MulOut_alpaca(30000)
+            train_set = read_aya()
             train_dataset = MathDataset(train_set, self.args.training_stage)
         else:
             raise ValueError(f"Invalid training stage: {self.args.training_stage}")
@@ -376,18 +386,18 @@ if __name__ == '__main__':
     )
 
     model_class = LangBridgeModel
-    if training_args.training_stage == 1:
-        model = model_class(config, random_init=False)
-    elif training_args.training_stage == 2 or training_args.training_stage == 3:
-        if training_args.hf_checkpoint_path:
-            logger.info('loading from HF checkpoint...')
+    # if training_args.training_stage == 1:
+    model = model_class(config, random_init=False)
+    # elif training_args.training_stage == 2 or training_args.training_stage == 3:
+    #     if training_args.hf_checkpoint_path:
+    #         logger.info('loading from HF checkpoint...')
 
-            model = model_class.from_pretrained(
-                training_args.hf_checkpoint_path, config=config)
-        else:
-            raise ValueError("HF checkpoint path is required for training stage 2 and 3")
-    else:
-        raise ValueError(f"Invalid training stage: {training_args.training_stage}")
+    #         model = model_class.from_pretrained(
+    #             training_args.hf_checkpoint_path, config=config)
+    #     else:
+    #         raise ValueError("HF checkpoint path is required for training stage 2 and 3")
+    # else:
+    #     raise ValueError(f"Invalid training stage: {training_args.training_stage}")
 
     # this is true for all our experiments, explained in section D.1
     # if training_args.add_new_lines_to_enc:
