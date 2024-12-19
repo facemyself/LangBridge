@@ -1,9 +1,9 @@
 #!/bin/env bash
-#export OMP_NUM_THREADS=8
-export HUGGINGFACE_HUB_CACHE=/data1/rzw/CACHE/huggingface/hub
+export OMP_NUM_THREADS=8
+#export HUGGINGFACE_HUB_CACHE=/data1/rzw/CACHE/huggingface/hub
 
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=0
 NUM_GPU=1
 
 ARGS="
@@ -12,7 +12,7 @@ ARGS="
 --output_dir checkpoints/metamath-lb-9b
 --run_name metamath-lb-9b
 --seed 42
---train_set_path /data1/rzw/CODE/LangBridge/data/metamath-200k
+--train_set_path /workspace/LangBridge/data/metamath-200k
 --output_exists True
 --enc_name_or_path google/mt5-xl
 --lm_name_or_path meta-math/MetaMath-7B-V1.0
