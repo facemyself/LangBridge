@@ -5,7 +5,7 @@ from abc import ABC
 from typing import Any, Dict, List
 import contextlib
 import logging
-
+from typing import Optional, Dict, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -211,6 +211,170 @@ class LBBaseModel(ABC, PreTrainedModel):
             attentions=out.attentions,
         )
 
+    def lm_forward(
+        self,
+        base_inputs,
+        return_dict=None
+    ):
+        base_outputs = self.model(**base_inputs, return_dict=return_dict)
+        return base_outputs
+
+    # def generate(
+    #     self,
+    #     input_ids: Optional[torch.Tensor] = None,
+    #     attention_mask: Optional[torch.Tensor] = None,
+    #     max_new_tokens: Optional[int] = 100,
+    #     do_sample: bool = False,
+    #     top_p: float = 1.0,
+    #     temperature: float = 1.0,
+    #     logits_processor: Optional[LogitsProcessorList] = None,
+    #     stopping_criteria: Optional[StoppingCriteriaList] = None,
+    #     return_logits_for_analysis: bool = False,
+    #     **kwargs
+    # ):
+    #     base_kwargs = kwargs.copy()
+    #     base_input_ids = input_ids.to(base_input_ids.device)
+    #     base_kwargs['attention_mask'] = attention_mask
+
+    #     # keep track of which sequences are already finished
+    #     unfinished_sequences = torch.ones(base_input_ids.shape[0], dtype=torch.long, device=base_input_ids.device)
+    #     eos_token_id_tensor = torch.tensor([self.tokenizer.eos_token_id]).to(base_input_ids.device)
+
+    #     if return_logits_for_analysis:
+    #         analysis_data = defaultdict(list)
+        
+    #     input_length = len(base_input_ids[0])
+    #     cal = True
+    #     for step in range(max_new_tokens):
+    #         # prepare model inputs with past_key_values and attention_mask
+    #         base_inputs = self.prepare_inputs_for_generation(base_input_ids, **base_kwargs)            
+    #         base_outputs,  = self.forward(
+    #             base_inputs, return_dict=True
+    #         )
+    #             base_next_token_logits = base_outputs.logits[..., -1, :]
+    #             pos_next_token_logits = pos_outputs.logits[..., -1, :]
+    #             neg_next_token_logits = neg_outputs.logits[..., -1, :]
+
+    #             # sometimes our experts have extra (irrelevant) tokens at the end of the normal vocabulary
+    #             pos_next_token_logits = pos_next_token_logits[:, :base_next_token_logits.shape[-1]]
+    #             neg_next_token_logits = neg_next_token_logits[:, :base_next_token_logits.shape[-1]]
+    #             # DExperts!
+    #             if method == "all_log_softmax":
+    #                 base_next_token_logits = F.log_softmax(base_next_token_logits, dim=-1)
+    #                 pos_next_token_logits = F.log_softmax(pos_next_token_logits, dim=-1)
+    #                 neg_next_token_logits = F.log_softmax(neg_next_token_logits, dim=-1)
+    #             elif method == "pos_neg_log_softmax":
+    #                 pos_next_token_logits = F.log_softmax(pos_next_token_logits, dim=-1)
+    #                 neg_next_token_logits = F.log_softmax(neg_next_token_logits, dim=-1)
+    #             elif method == "all_softmax":
+    #                 base_next_token_logits = F.softmax(base_next_token_logits, dim=-1)
+    #                 pos_next_token_logits = F.softmax(pos_next_token_logits, dim=-1)
+    #                 neg_next_token_logits = F.softmax(neg_next_token_logits, dim=-1)
+    #             elif method == "pos_neg_softmax":
+    #                 pos_next_token_logits = F.softmax(pos_next_token_logits, dim=-1)
+    #                 neg_next_token_logits = F.softmax(neg_next_token_logits, dim=-1)
+    #             entropy_base = compute_entropy(base_next_token_logits).unsqueeze(dim=1)
+    #             #entropy_base = torch.where(entropy_base < 0.1, torch.tensor(0.0).to(entropy_base.device), entropy_base)
+    #             if method == "1":
+    #                 #entropy_base = torch.where(entropy_base <= 0.5, torch.tensor(1).to(entropy_base.device), entropy_base)
+    #                 entropy_base = torch.where(entropy_base >= 0.5, torch.tensor(1).to(entropy_base.device), entropy_base)
+    #             elif method == "2":
+    #                 entropy_base = torch.where(entropy_base >= self.threshold, torch.tensor(2).to(entropy_base.device), entropy_base)
+    #             elif method == "0":
+    #                 entropy_base = entropy_base
+                    
+    #             else:
+    #                 print("method must be '1' or '2' or 0")
+    #             if weight_method == "entropy":
+    #                 next_token_logits = (
+    #                     base_next_token_logits +
+    #                     entropy_base * (pos_next_token_logits - neg_next_token_logits)
+    #                 )
+    #             elif weight_method == "alpha":
+    #                 next_token_logits = (
+    #                     base_next_token_logits +
+    #                     self.alpha * (pos_next_token_logits - neg_next_token_logits)
+    #                 )
+    #             else:
+    #                 raise ValueError("weight_method must be 'entropy' or 'alpha'")
+    #         else:
+    #             base_outputs = self.forward(
+    #                 base_inputs, return_dict=True)
+    #             pos_outputs, neg_outputs = None, None
+    #             base_next_token_logits = base_outputs.logits[..., -1, :]
+                
+    #             # DExperts!
+    #             next_token_logits = (
+    #                 base_next_token_logits
+    #             )
+           
+    #         # pre-process logits
+    #         # if logits_processor:
+    #         #     next_token_logits = logits_processor(input_ids, next_token_logits)
+    #         # top_k_values, top_k_indices = torch.topk(base_next_token_logits, k=5, dim=-1)
+    #         # top_k_values, top_k_indices = torch.topk(pos_next_token_logits, k=5, dim=-1)
+    #         # top_k_values, top_k_indices = torch.topk(neg_next_token_logits, k=5, dim=-1)
+    #         # top_k_values, top_k_indices = torch.topk(pos_next_token_logits - neg_next_token_logits, k=5, dim=-1)
+    #         # top_k_values, top_k_indices = torch.topk(next_token_logits, k=5, dim=-1)
+    #         # self.tokenizer.batch_decode(top_k_indices[0])
+    #         # pre-process logits
+    #         # if logits_processor:
+    #         #     next_token_logits = logits_processor(input_ids, next_token_logits)
+    #         # warp logits
+    #         if temperature != 1.0:
+    #             next_token_logits = next_token_logits / temperature
+    #         if top_p < 1.0:
+    #             next_token_logits = top_k_top_p_filtering(next_token_logits, top_p=top_p)
+
+    #         # decode
+    #         if do_sample:
+    #             probs = F.softmax(next_token_logits, dim=-1)
+    #             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+    #         else:
+    #             next_tokens = torch.argmax(next_token_logits, dim=-1)
+
+    #         next_tokens = (
+    #             next_tokens * unfinished_sequences +
+    #             self.tokenizer.pad_token_id * (1 - unfinished_sequences)
+    #         )
+    #         if return_logits_for_analysis:
+    #             next_token_logits_dict = {
+    #                 'dexperts': next_token_logits,
+    #                 'base': base_next_token_logits,
+    #                 'pos': pos_next_token_logits,
+    #                 'neg': neg_next_token_logits
+    #             }
+    #             analysis_data = self.update_analysis_data(analysis_data, next_tokens, next_token_logits_dict)
+
+    #         # update model inputs for next step
+    #         base_input_ids = torch.cat([base_input_ids, next_tokens[:, None]], dim=-1)
+    #         pos_input_ids = torch.cat([pos_input_ids, next_tokens[:, None]], dim=-1)
+    #         neg_input_ids = torch.cat([neg_input_ids, next_tokens[:, None]], dim=-1)
+
+    #         # update kwargs
+    #         base_kwargs = self._update_model_kwargs_for_generation(base_outputs, base_kwargs)
+    #         pos_kwargs = self._update_model_kwargs_for_generation(pos_outputs, pos_kwargs)
+    #         neg_kwargs = self._update_model_kwargs_for_generation(neg_outputs, neg_kwargs)
+
+    #         # stopping criteria
+    #         if stopping_criteria and stopping_criteria(base_input_ids, None):
+    #             break
+
+    #         # if eos_token was found in one sentence, set sentence to finished
+    #         unfinished_sequences = unfinished_sequences.mul(
+    #             next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
+    #         )
+
+    #         # stop when each sentence is finished
+    #         if unfinished_sequences.max() == 0:
+    #             break
+    #     if return_logits_for_analysis:
+    #         for k in analysis_data.keys():
+    #             if k.startswith('logits'):
+    #                 analysis_data[k] = torch.cat(analysis_data[k], dim=1)
+    #         return base_input_ids, analysis_data
+        
+    #     return base_input_ids
 
 # used for debbuging with opt-125m
 class LBOPT(LBBaseModel):
